@@ -260,13 +260,13 @@ impl Memvid {
                 }
             }
 
-            // Vector-only candidate list.
             if self.vec_enabled && query_embedding.is_some() {
                 let vec_hits = vector_hits(
                     self,
                     query_embedding.as_deref().unwrap_or(&[]),
                     &request,
                     effective_top_k.max(24).min(64),
+                    embedder.as_ref().and_then(|e| e.model_name()),
                 )?;
                 if !vec_hits.is_empty() {
                     candidate_lists.push(vec_hits);
@@ -1337,6 +1337,7 @@ fn vector_hits(
     query_embedding: &[f32],
     request: &AskRequest,
     limit: usize,
+    model_name: Option<&str>,
 ) -> Result<Vec<SearchHit>> {
     if !memvid.vec_enabled || query_embedding.is_empty() {
         return Ok(Vec::new());
@@ -1345,7 +1346,7 @@ fn vector_hits(
     // Use adaptive retrieval if configured
     if let Some(ref adaptive_config) = request.adaptive {
         if adaptive_config.enabled {
-            let result = memvid.search_adaptive_acl(
+            let result = memvid.search_adaptive_verified(
                 &request.question,
                 query_embedding,
                 adaptive_config.clone(),
@@ -1353,6 +1354,7 @@ fn vector_hits(
                 request.scope.as_deref(),
                 request.acl_context.as_ref(),
                 request.acl_enforcement_mode,
+                model_name,
             )?;
             tracing::debug!(
                 "adaptive retrieval: {} -> {} results ({})",
@@ -1364,7 +1366,7 @@ fn vector_hits(
         }
     }
 
-    let vec_response = memvid.vec_search_with_embedding_acl(
+    let vec_response = memvid.vec_search_with_embedding_verified(
         &request.question,
         query_embedding,
         limit,
@@ -1372,6 +1374,7 @@ fn vector_hits(
         request.scope.as_deref(),
         request.acl_context.as_ref(),
         request.acl_enforcement_mode,
+        model_name,
     )?;
 
     Ok(vec_response.hits)

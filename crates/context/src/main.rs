@@ -387,8 +387,8 @@ fn score_candidate(
 ) -> f64 {
     let mut score = 0.0;
     match header.get("project") {
-        Some(value) if value.eq_ignore_ascii_case(project) => score += 32.0,
-        Some(value) if value.eq_ignore_ascii_case("global") => score += 24.0,
+        Some(value) if value.eq_ignore_ascii_case(project) => score += 46.0,
+        Some(value) if value.eq_ignore_ascii_case("global") => score += 18.0,
         Some(_) => score += 4.0,
         None => score += 2.0,
     }
@@ -438,11 +438,20 @@ fn query_tokens(project: &str, cwd: &Path, queries: &[String]) -> BTreeSet<Strin
     let mut seed = String::new();
     seed.push_str(project);
     seed.push(' ');
-    seed.push_str(&cwd.to_string_lossy());
-    seed.push_str(" handoff next risk bug decision protocol source truth service wrapper context");
-    for query in queries {
-        seed.push(' ');
-        seed.push_str(query);
+    if queries.is_empty() {
+        seed.push_str(&cwd.to_string_lossy());
+        seed.push_str(
+            " handoff next risk bug decision protocol source truth service wrapper context",
+        );
+    } else {
+        if let Some(name) = cwd.file_name().and_then(|name| name.to_str()) {
+            seed.push_str(name);
+            seed.push(' ');
+        }
+        for query in queries {
+            seed.push(' ');
+            seed.push_str(query);
+        }
     }
     tokenize(&seed)
 }

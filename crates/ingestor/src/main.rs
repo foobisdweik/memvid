@@ -5,7 +5,7 @@ use memvid_core::{Memvid, PutOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
 struct RolloverStore {
@@ -83,10 +83,21 @@ impl RolloverStore {
         }
         Ok(())
     }
+
+    fn commit_pending(&mut self) -> Result<()> {
+        if self.counter > 0 {
+            self.memvid.commit()?;
+            self.counter = 0;
+            println!("Committed idle batch.");
+        }
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
-    let settings = load_settings("config/settings.toml")?;
+    let settings_path = settings_path_from_env();
+    println!("Loading settings from {settings_path}...");
+    let settings = load_settings(&settings_path)?;
     ensure_directories(&settings)?;
 
     let mut store = RolloverStore::new(
@@ -95,6 +106,7 @@ fn main() -> Result<()> {
     )?;
 
     println!("Ingestor listening on {}...", settings.paths.ingest);
+    let mut last_processed = Instant::now();
 
     loop {
         let mut processed_any = false;
@@ -115,17 +127,11 @@ fn main() -> Result<()> {
             }
 
             let emb_path = path.to_path_buf();
-            let mut text_path = emb_path.clone();
-            // Revert to original extension or no extension. For simplicity, assume original was .txt
-            // or just strip the .emb and use the base name as the file if we dropped the extension.
-            text_path.set_extension("txt");
-            // Wait, in embedder we did `emb_path.set_extension("emb");` which replaced the existing extension.
-            // If the original was .txt, it became .emb. So we can just set it back to .txt.
+            let Some(text_path) = text_path_for_embedding(&emb_path) else {
+                continue;
+            };
 
             if !text_path.exists() {
-                // Original file might not have had an extension or had a different one.
-                // A better approach is checking if the base name without extension exists.
-                // For this prototype, we'll try to find the non-.emb file with the same stem.
                 continue;
             }
 
@@ -147,6 +153,7 @@ fn main() -> Result<()> {
                     // Just delete the .emb file as we don't need it anymore
                     fs::remove_file(&emb_path).ok();
                     processed_any = true;
+                    last_processed = Instant::now();
                 }
                 Err(e) => {
                     println!("Failed to ingest {}: {}", uri, e);
@@ -158,7 +165,19 @@ fn main() -> Result<()> {
         }
 
         if !processed_any {
+            if last_processed.elapsed() >= Duration::from_secs(2) {
+                if let Err(err) = store.commit_pending() {
+                    eprintln!("Failed to commit idle batch: {err}");
+                }
+                last_processed = Instant::now();
+            }
             thread::sleep(Duration::from_millis(500));
         }
     }
+}
+
+fn text_path_for_embedding(emb_path: &Path) -> Option<PathBuf> {
+    let filename = emb_path.file_name()?.to_str()?;
+    let text_filename = filename.strip_suffix(".emb")?;
+    Some(emb_path.with_file_name(text_filename))
 }

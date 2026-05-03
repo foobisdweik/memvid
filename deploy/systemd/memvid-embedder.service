@@ -1,0 +1,18 @@
+[Unit]
+Description=Memvid CUDA queue embedder
+After=local-fs.target memvid-ingestor.service
+Wants=memvid-ingestor.service
+
+[Service]
+Type=simple
+User=omen
+Group=omen
+Environment=MEMVID_CONFIG=/etc/memvid/settings.toml
+Environment=LD_LIBRARY_PATH=/usr/local/lib/memvid:/usr/lib/x86_64-linux-gnu
+WorkingDirectory=/var/lib/memvid
+ExecStart=/usr/local/bin/memvid-embedder
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

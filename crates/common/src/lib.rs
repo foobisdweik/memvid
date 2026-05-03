@@ -1,7 +1,9 @@
 use anyhow::Result;
 use serde::Deserialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+pub const DEFAULT_SETTINGS_PATH: &str = "/etc/memvid/settings.toml";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
@@ -36,6 +38,11 @@ pub struct Ingestion {
 pub fn load_settings(path: &str) -> Result<Settings> {
     let content = fs::read_to_string(path)?;
     Ok(toml::from_str(&content)?)
+}
+
+#[must_use]
+pub fn settings_path_from_env() -> String {
+    std::env::var("MEMVID_CONFIG").unwrap_or_else(|_| DEFAULT_SETTINGS_PATH.to_string())
 }
 
 #[derive(Clone, Debug)]
@@ -89,8 +96,9 @@ pub fn ensure_directories(settings: &Settings) -> Result<()> {
     fs::create_dir_all(&settings.paths.ingest)?;
     fs::create_dir_all(&settings.paths.done)?;
     fs::create_dir_all(&settings.paths.failed)?;
+    fs::create_dir_all(&settings.paths.store)?;
 
-    if let Some(store_parent) = PathBuf::from(&settings.paths.store).parent() {
+    if let Some(store_parent) = Path::new(&settings.paths.store).parent() {
         fs::create_dir_all(store_parent)?;
     }
 

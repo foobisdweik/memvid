@@ -4,7 +4,7 @@ use ndarray::Array2;
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::Tensor;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use tokenizers::Tokenizer;
 use walkdir::WalkDir;
@@ -53,6 +53,23 @@ impl CudaEmbedder {
                 ort::execution_providers::CUDAExecutionProvider::default().build()
             ])?
             .commit_from_file(model_path)?;
+
+        println!(
+            "Model inputs: {:?}",
+            session
+                .inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "Model outputs: {:?}",
+            session
+                .outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>()
+        );
 
         Ok(Self { session, tokenizer })
     }
@@ -130,7 +147,7 @@ impl CudaEmbedder {
             }
             result
         } else {
-            // Fallback to CLS token from 'last_hidden_state'
+            // Nomic exports `last_hidden_state`; mean-pool with attention mask and normalize.
             let val = outputs
                 .get("last_hidden_state")
                 .context("Model must output either sentence_embedding or last_hidden_state")?;
@@ -140,19 +157,36 @@ impl CudaEmbedder {
 
             let mut result = Vec::with_capacity(batch_size);
             for i in 0..batch_size {
-                // CLS token is at index 0 of the sequence
-                let start = i * seq * dim;
-                let end = start + dim;
-
-                // L2 normalization for BGE/Nomic
-                let cls_embedding = &tensor_data[start..end];
+                let mut pooled = vec![0.0f32; dim];
+                let mut mask_sum = 0.0f32;
+                for token_index in 0..seq {
+                    let mask = encodings[i].get_attention_mask()[token_index] as f32;
+                    if mask <= 0.0 {
+                        continue;
+                    }
+                    mask_sum += mask;
+                    let token_start = (i * seq + token_index) * dim;
+                    let token_end = token_start + dim;
+                    for (dst, src) in pooled.iter_mut().zip(&tensor_data[token_start..token_end]) {
+                        *dst += src * mask;
+                    }
+                }
+                if mask_sum > 0.0 {
+                    for value in &mut pooled {
+                        *value /= mask_sum;
+                    }
+                }
                 let mut norm: f32 = 0.0;
-                for &val in cls_embedding {
+                for &val in &pooled {
                     norm += val * val;
                 }
                 norm = norm.sqrt();
 
-                let normalized: Vec<f32> = cls_embedding.iter().map(|&val| val / norm).collect();
+                let normalized = if norm > 0.0 {
+                    pooled.iter().map(|&val| val / norm).collect()
+                } else {
+                    pooled
+                };
                 result.push(normalized);
             }
             result
@@ -163,7 +197,9 @@ impl CudaEmbedder {
 }
 
 fn main() -> Result<()> {
-    let settings = load_settings("config/settings.toml")?;
+    let settings_path = settings_path_from_env();
+    println!("Loading settings from {settings_path}...");
+    let settings = load_settings(&settings_path)?;
     ensure_directories(&settings)?;
 
     // Check if models exist, otherwise error out cleanly.
@@ -195,20 +231,35 @@ fn main() -> Result<()> {
             let job: Job = job;
             let embedding: Vec<f32> = embedding;
             // Write embedding to a sidecar file or JSON
-            let filename = job.path.file_name().unwrap();
-            let mut emb_path = job.path.clone();
-            emb_path.set_extension("emb");
+            let Some(filename) = job.path.file_name() else {
+                eprintln!("Skipping job with no filename: {}", job.path.display());
+                continue;
+            };
+            let emb_filename = format!("{}.emb", filename.to_string_lossy());
+            let emb_path = job.path.with_file_name(&emb_filename);
 
             // Serialize embedding
-            let emb_bytes = bincode::serialize(&embedding).expect("Failed to serialize embedding");
-            fs::write(&emb_path, emb_bytes).expect("Failed to write embedding");
+            let Ok(emb_bytes) = bincode::serialize(&embedding) else {
+                eprintln!("Failed to serialize embedding for {}", job.path.display());
+                continue;
+            };
+            if let Err(err) = fs::write(&emb_path, emb_bytes) {
+                eprintln!("Failed to write embedding {}: {err}", emb_path.display());
+                continue;
+            }
 
             // Move both to ingest directory
             let new_text_path = PathBuf::from(&ingest_dir).join(filename);
-            let new_emb_path = PathBuf::from(&ingest_dir).join(emb_path.file_name().unwrap());
+            let new_emb_path = PathBuf::from(&ingest_dir).join(&emb_filename);
 
-            fs::rename(&job.path, &new_text_path).expect("Failed to move text to ingest");
-            fs::rename(&emb_path, &new_emb_path).expect("Failed to move emb to ingest");
+            if let Err(err) = fs::rename(&job.path, &new_text_path) {
+                eprintln!("Failed to move text to ingest: {err}");
+                continue;
+            }
+            if let Err(err) = fs::rename(&emb_path, &new_emb_path) {
+                eprintln!("Failed to move embedding to ingest: {err}");
+                continue;
+            }
 
             println!("Embedded and ready for ingest: {}", new_text_path.display());
         }
@@ -223,9 +274,10 @@ fn main() -> Result<()> {
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            if entry.file_type().is_file() {
+            let path = entry.path();
+            if is_queue_markdown(path, entry.file_type().is_file()) {
                 jobs.push(Job {
-                    path: entry.path().to_path_buf(),
+                    path: path.to_path_buf(),
                 });
             }
             if jobs.len() >= settings.embedding.batch_size {
@@ -241,11 +293,13 @@ fn main() -> Result<()> {
         let mut texts = Vec::new();
         for job in &jobs {
             match move_to_processing(job, &settings.paths.processing) {
-                Ok(moved) => {
-                    if let Ok(text) = fs::read_to_string(&moved.path) {
-                        texts.push((moved, text));
+                Ok(moved) => match fs::read_to_string(&moved.path) {
+                    Ok(text) => texts.push((moved, text)),
+                    Err(err) => {
+                        eprintln!("Failed to read {}: {err}", moved.path.display());
+                        let _ = move_to_failed(&moved, &settings.paths.failed);
                     }
-                }
+                },
                 Err(e) => {
                     println!("Failed to move job to processing: {}", e);
                 }
@@ -273,4 +327,14 @@ fn main() -> Result<()> {
             }
         }
     }
+}
+
+fn is_queue_markdown(path: &Path, is_file: bool) -> bool {
+    if !is_file {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    !name.starts_with(".tmp.") && path.extension().and_then(|ext| ext.to_str()) == Some("md")
 }

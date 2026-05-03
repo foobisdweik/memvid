@@ -378,6 +378,7 @@ impl Memvid {
                 context: build_context(&[]),
                 next_cursor: None,
                 engine: SearchEngineKind::Hybrid,
+                stale_index_skips: 0,
             });
         };
 
@@ -1201,6 +1202,8 @@ mod tests {
             10,
             100,
             None,
+            None,
+            AclEnforcementMode::Audit,
             Some("My-Model"), // Case insensitive check
         )?;
         assert!(res.hits.is_empty());
@@ -1213,6 +1216,8 @@ mod tests {
                 10,
                 100,
                 None,
+                None,
+                AclEnforcementMode::Audit,
                 Some("Wrong-Model"),
             )
             .unwrap_err();

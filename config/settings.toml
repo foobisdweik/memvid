@@ -1,0 +1,16 @@
+[paths]
+queue = "queue/in"
+processing = "queue/processing"
+ingest = "queue/ingest"
+done = "queue/done"
+failed = "queue/failed"
+store = "store" # This is a directory now, not a specific file, because we rotate daily.
+
+[embedding]
+model_path = "/opt/models/nomic-embed-text-v1/model.onnx"
+tokenizer_path = "/opt/models/nomic-embed-text-v1/tokenizer.json"
+batch_size = 32
+max_length = 512
+
+[ingestion]
+commit_interval = 32

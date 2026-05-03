@@ -30,6 +30,7 @@ vector_embedding.txt
 *.txt
 # Exception: SymSpell dictionary files needed for PDF text cleanup
 !data/*.txt
+!crates/core/data/*.txt
 *.docx
 *.doc
 *.pptx

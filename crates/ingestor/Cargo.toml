@@ -1,0 +1,13 @@
+[package]
+name = "memvid-ingestor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvid-common = { path = "../common" }
+memvid-core = { path = "../core", features = ["vec", "lex", "parallel_segments"] }
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+chrono = "0.4"
+walkdir = "2.0"
+bincode = "1.3"

@@ -10,7 +10,7 @@ Default output:
 
 ```text
 dist/memvid-bootstrap-x86_64-linux.run
-dist/memvid-bootstrap-x86_64-linux.tar.xz
+dist/memvid-bootstrap-x86_64-linux.run.tar.xz
 ```
 
 The bundle contains:
@@ -26,12 +26,32 @@ The bundle contains:
 - rebuildable source snapshot installed to `/opt/memvid/source`
 - installer logic for settings, state dirs, systemd units, and Bash aliases
 
-The payload uses multithreaded `xz -9e -T0` compression by default. `xz` is mainstream on Linux and gives a stronger ratio than gzip without depending on niche decompression tooling. The `.run` file is a small shell stub with the same `tar.xz` payload appended; the standalone `.tar.xz` is emitted for systems or workflows that prefer direct archive extraction.
+The `.run` file is intentionally uncompressed. It is the fast local installer.
 
-`xz -T0` may choose fewer threads than the machine's logical CPU count at high presets because memory use scales per thread. Override it when building:
+The `.run.tar.xz` file is the compressed transfer artifact. It is what you copy over the network, upload, archive, or share. Extract it first, then run the resulting `.run`.
+
+This layout is intentionally simple:
+
+```text
+memvid-bootstrap-x86_64-linux.run          # fast local install
+memvid-bootstrap-x86_64-linux.run.tar.xz   # compressed network/storage form
+```
+
+The transfer artifact uses multithreaded `xz -9e -T0` compression by default. `xz` is mainstream on Linux and gives a stronger ratio than gzip without depending on niche decompression tooling.
+
+`xz -T0` may choose fewer threads than the machine's logical CPU count when the input stream has only a few large blocks. The builder defaults to `XZ_BLOCK_SIZE=64MiB` so the compressor has enough blocks to feed more threads. Override compression knobs when building:
 
 ```bash
-MEMVID_XZ_THREADS=8 packaging/build-self-extracting-installer.sh
+MEMVID_XZ_THREADS=12 MEMVID_XZ_BLOCK_SIZE=32MiB packaging/build-self-extracting-installer.sh
+```
+
+The builder also honors `XZ_THREADS`, `XZ_BLOCK_SIZE`, and `XZ_MEMLIMIT`. Recommended shell defaults:
+
+```bash
+export XZ_THREADS=0
+export MEMVID_XZ_THREADS=0
+export XZ_BLOCK_SIZE=64MiB
+export XZ_MEMLIMIT=75%
 ```
 
 Install:

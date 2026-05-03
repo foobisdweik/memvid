@@ -333,11 +333,11 @@ install_files() {
   run install -o root -g root -m 0644 "$SELF_DIR/docs/memvid-context.md" "$PREFIX/share/memvid/docs/"
   run install -o root -g root -m 0644 "$SELF_DIR/model/model.onnx" "$MODEL_DIR/model.onnx"
   run install -o root -g root -m 0644 "$SELF_DIR/model/tokenizer.json" "$MODEL_DIR/tokenizer.json"
-  run install -o root -g root -m 0644 "$SELF_DIR/source/memvid-source.tar.gz" "$PREFIX/share/memvid/memvid-source.tar.gz"
+  run install -o root -g root -m 0644 "$SELF_DIR/source/memvid-source.tar" "$PREFIX/share/memvid/memvid-source.tar"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] extract source snapshot to $SOURCE_DIR"
   else
-    tar -xzf "$SELF_DIR/source/memvid-source.tar.gz" -C "$SOURCE_DIR"
+    tar -xf "$SELF_DIR/source/memvid-source.tar" -C "$SOURCE_DIR"
   fi
   write_settings
 }
@@ -470,7 +470,7 @@ verify_install() {
     "$CONFIG_DIR/settings.toml"
     "$MODEL_DIR/model.onnx"
     "$MODEL_DIR/tokenizer.json"
-    "$PREFIX/share/memvid/memvid-source.tar.gz"
+    "$PREFIX/share/memvid/memvid-source.tar"
   )
   for path in "${required[@]}"; do
     if [[ "$DRY_RUN" -eq 1 ]]; then

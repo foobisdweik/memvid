@@ -6,8 +6,10 @@ DIST="$ROOT/dist"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/memvid-sfx.XXXXXX")"
 PAYLOAD="$WORK/payload"
 OUT="${1:-$DIST/memvid-bootstrap-x86_64-linux.run}"
-TAR_OUT="${MEMVID_TAR_OUT:-${OUT%.run}.tar.xz}"
-XZ_THREADS="${MEMVID_XZ_THREADS:-0}"
+COMPRESSED_OUT="${MEMVID_COMPRESSED_OUT:-$OUT.tar.xz}"
+XZ_THREADS="${MEMVID_XZ_THREADS:-${XZ_THREADS:-0}}"
+XZ_MEMLIMIT="${XZ_MEMLIMIT:-75%}"
+XZ_BLOCK_SIZE="${MEMVID_XZ_BLOCK_SIZE:-${XZ_BLOCK_SIZE:-64MiB}}"
 
 cleanup() {
   rm -rf "$WORK"
@@ -78,7 +80,7 @@ tar -C "$ROOT" \
   --exclude='*.mv2' \
   --exclude='*.mv2-*' \
   --exclude='*.mv2.*' \
-  -czf "$PAYLOAD/source/memvid-source.tar.gz" .
+  -cf "$PAYLOAD/source/memvid-source.tar" .
 
 cat > "$PAYLOAD/MANIFEST.txt" <<EOF
 memvid self-extracting payload
@@ -86,19 +88,14 @@ created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 git_commit=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 model=$MODEL_ONNX
 tokenizer=$TOKENIZER_JSON
-source_snapshot=source/memvid-source.tar.gz
+source_snapshot=source/memvid-source.tar
 EOF
 
-ARCHIVE="$WORK/payload.tar.xz"
-msg "Creating xz payload archive with -9e -T${XZ_THREADS} compression"
-if ! command -v xz >/dev/null 2>&1; then
-  echo "xz not found; install xz-utils/xz before building the self-extracting installer" >&2
-  exit 1
-fi
-XZ_OPT="-9e -T${XZ_THREADS}" tar -C "$WORK" -cJf "$ARCHIVE" payload
+ARCHIVE="$WORK/payload.tar"
+msg "Creating uncompressed payload tar"
+tar -C "$WORK" -cf "$ARCHIVE" payload
 
 mkdir -p "$(dirname "$OUT")"
-cp "$ARCHIVE" "$TAR_OUT"
 cat > "$OUT" <<'STUB'
 #!/bin/sh
 set -eu
@@ -142,13 +139,8 @@ if [ -z "$line" ]; then
   exit 1
 fi
 
-if ! command -v xz >/dev/null 2>&1; then
-  echo "xz is required to extract this installer. Install xz/xz-utils and re-run." >&2
-  exit 1
-fi
-
-tail -n +"$line" "$0" > "$tmp/payload.tar.xz"
-tar -xJf "$tmp/payload.tar.xz" -C "$tmp"
+tail -n +"$line" "$0" > "$tmp/payload.tar"
+tar -xf "$tmp/payload.tar" -C "$tmp"
 exec "$tmp/payload/install.sh" "$@"
 
 __MEMVID_ARCHIVE_BELOW__
@@ -156,7 +148,18 @@ STUB
 cat "$ARCHIVE" >> "$OUT"
 chmod 0755 "$OUT"
 
+if ! command -v xz >/dev/null 2>&1; then
+  echo "xz not found; skipping compressed transfer artifact" >&2
+else
+  msg "Creating compressed transfer artifact with xz -9e -T${XZ_THREADS} --block-size=${XZ_BLOCK_SIZE} --memlimit-compress=${XZ_MEMLIMIT}"
+  tar -C "$(dirname "$OUT")" -cf - "$(basename "$OUT")" \
+    | xz -9e -T"${XZ_THREADS}" --block-size="${XZ_BLOCK_SIZE}" --memlimit-compress="${XZ_MEMLIMIT}" -c \
+    > "$COMPRESSED_OUT"
+fi
+
 msg "Created $OUT"
 du -h "$OUT"
-msg "Created $TAR_OUT"
-du -h "$TAR_OUT"
+if [[ -f "$COMPRESSED_OUT" ]]; then
+  msg "Created $COMPRESSED_OUT"
+  du -h "$COMPRESSED_OUT"
+fi

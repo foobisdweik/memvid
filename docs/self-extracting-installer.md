@@ -10,6 +10,7 @@ Default output:
 
 ```text
 dist/memvid-bootstrap-x86_64-linux.run
+dist/memvid-bootstrap-x86_64-linux.tar.xz
 ```
 
 The bundle contains:
@@ -25,7 +26,13 @@ The bundle contains:
 - rebuildable source snapshot installed to `/opt/memvid/source`
 - installer logic for settings, state dirs, systemd units, and Bash aliases
 
-The self-extracting payload uses `xz -9e` compression. `xz` is mainstream on Linux and gives a stronger ratio than gzip without depending on niche decompression tooling.
+The payload uses multithreaded `xz -9e -T0` compression by default. `xz` is mainstream on Linux and gives a stronger ratio than gzip without depending on niche decompression tooling. The `.run` file is a small shell stub with the same `tar.xz` payload appended; the standalone `.tar.xz` is emitted for systems or workflows that prefer direct archive extraction.
+
+`xz -T0` may choose fewer threads than the machine's logical CPU count at high presets because memory use scales per thread. Override it when building:
+
+```bash
+MEMVID_XZ_THREADS=8 packaging/build-self-extracting-installer.sh
+```
 
 Install:
 

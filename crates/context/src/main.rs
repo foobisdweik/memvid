@@ -102,6 +102,14 @@ struct Candidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectMatch {
+    Exact,
+    Embedded,
+    Global,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     Handoff,
     Fresh,
@@ -230,7 +238,8 @@ fn collect_candidates(
             }
 
             let (header, body) = parse_header(text);
-            if !include_other_projects && !is_project_visible(&header, project) {
+            let project_match = classify_project_match(&header, &body, project);
+            if !include_other_projects && !is_project_visible(project_match) {
                 continue;
             }
             let record_ts = header
@@ -241,7 +250,7 @@ fn collect_candidates(
             let age_hours = record_ts
                 .map(|ts| (now - ts).num_minutes().max(0) as f64 / 60.0)
                 .unwrap_or(horizon_hours);
-            let score = score_candidate(&header, &body, project, query_tokens, age_hours);
+            let score = score_candidate(&header, &body, project_match, query_tokens, age_hours);
 
             candidates.push(Candidate {
                 store: store.path.clone(),
@@ -258,13 +267,64 @@ fn collect_candidates(
     candidates
 }
 
-fn is_project_visible(header: &Header, project: &str) -> bool {
-    match header.get("project") {
-        Some(value) if value.eq_ignore_ascii_case(project) => true,
-        Some(value) if value.eq_ignore_ascii_case("global") => true,
-        Some(_) => false,
-        None => false,
+fn is_project_visible(project_match: ProjectMatch) -> bool {
+    matches!(
+        project_match,
+        ProjectMatch::Exact | ProjectMatch::Embedded | ProjectMatch::Global
+    )
+}
+
+fn classify_project_match(header: &Header, body: &str, project: &str) -> ProjectMatch {
+    if let Some(value) = header.get("project") {
+        if normalized_project_key(value) == normalized_project_key(project) {
+            return ProjectMatch::Exact;
+        }
+        if value.eq_ignore_ascii_case("global") {
+            return ProjectMatch::Global;
+        }
     }
+    if body_mentions_project(body, project) {
+        return ProjectMatch::Embedded;
+    }
+    ProjectMatch::Other
+}
+
+fn body_mentions_project(body: &str, project: &str) -> bool {
+    let project_key = normalized_project_key(project);
+    if project_key.len() < 4 {
+        return false;
+    }
+    let body_key = normalized_project_key(body);
+    if body_key.contains(&project_key) {
+        return true;
+    }
+    let project_tokens = project_identity_tokens(project);
+    if project_tokens.is_empty() {
+        return false;
+    }
+    let body_tokens = tokenize(body);
+    let matches = project_tokens
+        .iter()
+        .filter(|token| body_tokens.contains(*token))
+        .count();
+    matches >= project_tokens.len().min(2)
+}
+
+fn normalized_project_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn project_identity_tokens(project: &str) -> BTreeSet<String> {
+    project
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.len() >= 3)
+        .filter(|token| !STOP_WORDS.contains(&token.as_str()))
+        .collect()
 }
 
 fn open_store(path: &Path) -> Result<Memvid> {
@@ -381,18 +441,19 @@ fn date_start(date: NaiveDate) -> Option<DateTime<Utc>> {
 fn score_candidate(
     header: &Header,
     body: &str,
-    project: &str,
+    project_match: ProjectMatch,
     query_tokens: &BTreeSet<String>,
     age_hours: f64,
 ) -> f64 {
     let mut score = 0.0;
-    match header.get("project") {
-        Some(value) if value.eq_ignore_ascii_case(project) => score += 46.0,
-        Some(value) if value.eq_ignore_ascii_case("global") => score += 18.0,
-        Some(_) => score += 4.0,
-        None => score += 2.0,
+    match project_match {
+        ProjectMatch::Exact => score += 70.0,
+        ProjectMatch::Embedded => score += 62.0,
+        ProjectMatch::Global => score += 8.0,
+        ProjectMatch::Other => score += 2.0,
     }
-    score += match header.get("type").unwrap_or_default() {
+    let record_type = header.get("type").unwrap_or_default();
+    score += match record_type {
         "handoff" => 30.0,
         "error" => 24.0,
         "update" => 16.0,
@@ -419,6 +480,9 @@ fn score_candidate(
         score += (overlap as f64 / query_tokens.len() as f64).min(1.0) * 35.0;
     }
     let lower = body.to_ascii_lowercase();
+    if matches!(project_match, ProjectMatch::Embedded) && record_type == "import" {
+        score += 12.0;
+    }
     if contains_any(
         &lower,
         &["risk", "blocked", "bug", "error", "failed", "todo", "next"],
@@ -428,7 +492,8 @@ fn score_candidate(
     if contains_any(
         &lower,
         &["must", "never", "source of truth", "protocol", "invariant"],
-    ) {
+    ) && !matches!(project_match, ProjectMatch::Global)
+    {
         score += 8.0;
     }
     score
@@ -440,9 +505,7 @@ fn query_tokens(project: &str, cwd: &Path, queries: &[String]) -> BTreeSet<Strin
     seed.push(' ');
     if queries.is_empty() {
         seed.push_str(&cwd.to_string_lossy());
-        seed.push_str(
-            " handoff next risk bug decision protocol source truth service wrapper context",
-        );
+        seed.push_str(" handoff next risk bug decision current state task");
     } else {
         if let Some(name) = cwd.file_name().and_then(|name| name.to_str()) {
             seed.push_str(name);

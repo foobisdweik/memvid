@@ -6,6 +6,8 @@ DIST="$ROOT/dist"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/memvid-sfx.XXXXXX")"
 PAYLOAD="$WORK/payload"
 OUT="${1:-$DIST/memvid-bootstrap-x86_64-linux.run}"
+TAR_OUT="${MEMVID_TAR_OUT:-${OUT%.run}.tar.xz}"
+XZ_THREADS="${MEMVID_XZ_THREADS:-0}"
 
 cleanup() {
   rm -rf "$WORK"
@@ -88,14 +90,15 @@ source_snapshot=source/memvid-source.tar.gz
 EOF
 
 ARCHIVE="$WORK/payload.tar.xz"
-msg "Creating xz payload archive with -9e compression"
+msg "Creating xz payload archive with -9e -T${XZ_THREADS} compression"
 if ! command -v xz >/dev/null 2>&1; then
   echo "xz not found; install xz-utils/xz before building the self-extracting installer" >&2
   exit 1
 fi
-XZ_OPT="-9e" tar -C "$WORK" -cJf "$ARCHIVE" payload
+XZ_OPT="-9e -T${XZ_THREADS}" tar -C "$WORK" -cJf "$ARCHIVE" payload
 
 mkdir -p "$(dirname "$OUT")"
+cp "$ARCHIVE" "$TAR_OUT"
 cat > "$OUT" <<'STUB'
 #!/bin/sh
 set -eu
@@ -155,3 +158,5 @@ chmod 0755 "$OUT"
 
 msg "Created $OUT"
 du -h "$OUT"
+msg "Created $TAR_OUT"
+du -h "$TAR_OUT"

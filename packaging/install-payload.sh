@@ -12,6 +12,8 @@ CONFIG_DIR=/etc/memvid
 STATE_DIR=/var/lib/memvid
 MODEL_DIR=/opt/models/nomic-embed-text-v1
 SOURCE_DIR=/opt/memvid/source
+CACHYOS_NVIDIA_SCOPE=installed
+CACHYOS_NVIDIA_FLAVOR=open
 RUN_USER="${SUDO_USER:-}"
 RUN_GROUP=""
 
@@ -38,6 +40,8 @@ Options:
   --state-dir PATH       State directory. Default: /var/lib/memvid.
   --model-dir PATH       Model directory. Default: /opt/models/nomic-embed-text-v1.
   --source-dir PATH      Source snapshot extract directory. Default: /opt/memvid/source.
+  --cachyos-nvidia SCOPE CachyOS NVIDIA modules: installed, all, or skip. Default: installed.
+  --nvidia-flavor FLAVOR NVIDIA kernel module flavor: open, closed, or auto. Default: open.
   -h, --help             Show this help.
 EOF
 }
@@ -54,6 +58,8 @@ while [[ $# -gt 0 ]]; do
     --state-dir) STATE_DIR="${2:?--state-dir requires a value}"; shift ;;
     --model-dir) MODEL_DIR="${2:?--model-dir requires a value}"; shift ;;
     --source-dir) SOURCE_DIR="${2:?--source-dir requires a value}"; shift ;;
+    --cachyos-nvidia) CACHYOS_NVIDIA_SCOPE="${2:?--cachyos-nvidia requires a value}"; shift ;;
+    --nvidia-flavor) CACHYOS_NVIDIA_FLAVOR="${2:?--nvidia-flavor requires a value}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
   esac
@@ -64,6 +70,16 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "This installer needs root privileges. Re-run with sudo or as root." >&2
   exit 1
 fi
+
+case "$CACHYOS_NVIDIA_SCOPE" in
+  installed|all|skip) ;;
+  *) echo "--cachyos-nvidia must be installed, all, or skip" >&2; exit 2 ;;
+esac
+
+case "$CACHYOS_NVIDIA_FLAVOR" in
+  open|closed|auto) ;;
+  *) echo "--nvidia-flavor must be open, closed, or auto" >&2; exit 2 ;;
+esac
 
 if id "$RUN_USER" >/dev/null 2>&1; then
   RUN_GROUP="$(id -gn "$RUN_USER")"
@@ -97,19 +113,165 @@ pkg_installed_deb() {
   dpkg -s "$1" >/dev/null 2>&1
 }
 
+pkg_installed_pacman() {
+  pacman -Qq "$1" >/dev/null 2>&1
+}
+
+pkg_available_pacman() {
+  pacman -Si "$1" >/dev/null 2>&1
+}
+
+is_cachyos() {
+  [[ "${MEMVID_FORCE_CACHYOS:-0}" == "1" ]] && return 0
+  [[ -r /etc/os-release ]] || return 1
+  local os_id="" os_id_like=""
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  os_id="${ID:-}"
+  os_id_like="${ID_LIKE:-}"
+  [[ "$os_id" == "cachyos" || " $os_id_like " == *" cachyos "* ]]
+}
+
+pacman_install_available() {
+  local pkg needed=()
+  for pkg in "$@"; do
+    if pkg_installed_pacman "$pkg"; then
+      continue
+    fi
+    if pkg_available_pacman "$pkg"; then
+      needed+=("$pkg")
+    else
+      warn "Pacman package not available in enabled repositories: $pkg"
+    fi
+  done
+
+  if [[ "${#needed[@]}" -gt 0 ]]; then
+    msg "Installing pacman packages: ${needed[*]}"
+    run pacman -Syu --needed --noconfirm "${needed[@]}"
+  fi
+}
+
+cachyos_kernel_variants_all() {
+  cat <<'EOF'
+linux-cachyos
+linux-cachyos-lto
+linux-cachyos-bore
+linux-cachyos-bore-lto
+linux-cachyos-bmq
+linux-cachyos-bmq-lto
+linux-cachyos-deckify
+linux-cachyos-deckify-lto
+linux-cachyos-eevdf
+linux-cachyos-eevdf-lto
+linux-cachyos-lts
+linux-cachyos-lts-lto
+linux-cachyos-hardened
+linux-cachyos-hardened-lto
+linux-cachyos-rc
+linux-cachyos-rc-lto
+linux-cachyos-server
+linux-cachyos-server-lto
+linux-cachyos-rt-bore
+linux-cachyos-rt-bore-lto
+EOF
+}
+
+cachyos_installed_kernel_variants() {
+  local pkg
+  pacman -Qq | while read -r pkg; do
+    case "$pkg" in
+      linux-cachyos|linux-cachyos-*)
+        case "$pkg" in
+          *-headers|*-nvidia|*-nvidia-open|*-zfs|*-dbg|*-r8125)
+            continue
+            ;;
+        esac
+        printf '%s\n' "$pkg"
+        ;;
+    esac
+  done
+}
+
+cachyos_module_package_for_kernel() {
+  local kernel="$1"
+  case "$CACHYOS_NVIDIA_FLAVOR" in
+    open)
+      pkg_available_pacman "$kernel-nvidia-open" && printf '%s\n' "$kernel-nvidia-open"
+      ;;
+    closed)
+      pkg_available_pacman "$kernel-nvidia" && printf '%s\n' "$kernel-nvidia"
+      ;;
+    auto)
+      if pkg_available_pacman "$kernel-nvidia-open"; then
+        printf '%s\n' "$kernel-nvidia-open"
+      elif pkg_available_pacman "$kernel-nvidia"; then
+        printf '%s\n' "$kernel-nvidia"
+      fi
+      ;;
+  esac
+}
+
+install_cachyos_nvidia_modules() {
+  [[ "$CACHYOS_NVIDIA_SCOPE" != "skip" ]] || return 0
+
+  local kernels=() kernel module modules=()
+  if [[ "$CACHYOS_NVIDIA_SCOPE" == "all" ]]; then
+    mapfile -t kernels < <(cachyos_kernel_variants_all)
+  else
+    mapfile -t kernels < <(cachyos_installed_kernel_variants)
+  fi
+
+  if [[ "${#kernels[@]}" -eq 0 ]]; then
+    warn "No CachyOS kernel packages detected for NVIDIA module matching."
+    return 0
+  fi
+
+  for kernel in "${kernels[@]}"; do
+    if [[ "$CACHYOS_NVIDIA_SCOPE" == "all" ]] && ! pkg_available_pacman "$kernel"; then
+      continue
+    fi
+    module="$(cachyos_module_package_for_kernel "$kernel" || true)"
+    if [[ -n "$module" ]]; then
+      modules+=("$module")
+    else
+      warn "No $CACHYOS_NVIDIA_FLAVOR NVIDIA module package found for CachyOS kernel: $kernel"
+    fi
+  done
+
+  if [[ "${#modules[@]}" -gt 0 ]]; then
+    msg "Installing CachyOS NVIDIA module packages for $CACHYOS_NVIDIA_SCOPE kernels: ${modules[*]}"
+    pacman_install_available "${modules[@]}"
+  else
+    warn "No CachyOS NVIDIA module packages selected."
+  fi
+}
+
+install_pacman_deps() {
+  msg "Installing Arch/CachyOS CUDA runtime packages"
+  pacman_install_available ca-certificates cuda cudnn nvidia-utils libglvnd
+
+  if is_cachyos; then
+    install_cachyos_nvidia_modules
+  else
+    warn "Arch-like system detected but not CachyOS; install a matching NVIDIA module or DKMS package for the active kernel if provider loading fails."
+  fi
+}
+
 install_deps() {
   [[ "$INSTALL_DEPS" -eq 1 ]] || return 0
   msg "Checking runtime dependencies"
 
   local missing_tools=()
-  for tool in tar sed awk find chmod chown install; do
+  for tool in tar xz sed awk find chmod chown install; do
     have "$tool" || missing_tools+=("$tool")
   done
   if [[ "${#missing_tools[@]}" -gt 0 ]]; then
     warn "Missing basic tools: ${missing_tools[*]}"
   fi
 
-  if [[ -f /etc/debian_version ]] && have apt-get; then
+  if [[ "${MEMVID_FORCE_PACMAN:-0}" == "1" ]] && have pacman; then
+    install_pacman_deps
+  elif [[ -f /etc/debian_version ]] && have apt-get; then
     local pkgs=(ca-certificates libcublas12 libcublaslt12 libcudart12 libcufft11 nvidia-cudnn)
     local needed=()
     for pkg in "${pkgs[@]}"; do
@@ -124,7 +286,7 @@ install_deps() {
   elif have dnf; then
     warn "DNF detected. CUDA/cuDNN package names vary by repository; install CUDA 12 runtime and cuDNN 9 if provider loading fails."
   elif have pacman; then
-    warn "Pacman detected. Install NVIDIA driver, CUDA runtime, and cuDNN if provider loading fails."
+    install_pacman_deps
   elif have zypper; then
     warn "Zypper detected. Install NVIDIA driver, CUDA 12 runtime, and cuDNN 9 if provider loading fails."
   elif have apk; then

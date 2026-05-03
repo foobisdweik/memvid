@@ -87,9 +87,13 @@ tokenizer=$TOKENIZER_JSON
 source_snapshot=source/memvid-source.tar.gz
 EOF
 
-ARCHIVE="$WORK/payload.tar.gz"
-msg "Creating payload archive"
-tar -C "$WORK" -czf "$ARCHIVE" payload
+ARCHIVE="$WORK/payload.tar.xz"
+msg "Creating xz payload archive with -9e compression"
+if ! command -v xz >/dev/null 2>&1; then
+  echo "xz not found; install xz-utils/xz before building the self-extracting installer" >&2
+  exit 1
+fi
+XZ_OPT="-9e" tar -C "$WORK" -cJf "$ARCHIVE" payload
 
 mkdir -p "$(dirname "$OUT")"
 cat > "$OUT" <<'STUB'
@@ -109,6 +113,8 @@ Common options:
   --no-services
   --no-aliases
   --user USER
+  --cachyos-nvidia installed|all|skip
+  --nvidia-flavor open|closed|auto
   --help
 EOF
 }
@@ -133,8 +139,13 @@ if [ -z "$line" ]; then
   exit 1
 fi
 
-tail -n +"$line" "$0" > "$tmp/payload.tar.gz"
-tar -xzf "$tmp/payload.tar.gz" -C "$tmp"
+if ! command -v xz >/dev/null 2>&1; then
+  echo "xz is required to extract this installer. Install xz/xz-utils and re-run." >&2
+  exit 1
+fi
+
+tail -n +"$line" "$0" > "$tmp/payload.tar.xz"
+tar -xJf "$tmp/payload.tar.xz" -C "$tmp"
 exec "$tmp/payload/install.sh" "$@"
 
 __MEMVID_ARCHIVE_BELOW__

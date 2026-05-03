@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+agent="${MEMVID_AGENT:-agent}"
+project="${MEMVID_PROJECT:-}"
+budget="${MEMVID_CONTEXT_BUDGET_TOKENS:-4000}"
+tmp="${TMPDIR:-/tmp}/memvid-context-${agent}-$$.md"
+
+args=(--agent "$agent" --budget-tokens "$budget")
+if [[ -n "$project" ]]; then
+  args+=(--project "$project")
+fi
+
+memvid-context "${args[@]}" > "$tmp"
+chmod 0600 "$tmp"
+export MEMVID_STARTUP_CONTEXT_FILE="$tmp"
+export MEMVID_STARTUP_CONTEXT="$(cat "$tmp")"
+
+if [[ "$#" -eq 0 ]]; then
+  cat "$tmp"
+  exit 0
+fi
+
+exec "$@"

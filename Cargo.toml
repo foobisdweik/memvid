@@ -2,6 +2,7 @@
 members = [
   "crates/core",
   "crates/common",
+  "crates/context",
   "crates/embedder",
   "crates/ingestor",
   "crates/migrator"

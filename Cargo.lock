@@ -3191,6 +3191,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "memvid-context"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "memvid-common",
+ "memvid-core",
+ "uuid",
+]
+
+[[package]]
 name = "memvid-core"
 version = "2.0.139"
 dependencies = [

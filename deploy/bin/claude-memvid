@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+context="$(MEMVID_AGENT=claude memvid-context --agent claude)"
+if [[ "$#" -eq 0 ]]; then
+  exec claude "$context"
+fi
+
+claude_args=()
+prompt_parts=()
+seen_separator=0
+for arg in "$@"; do
+  if [[ "$seen_separator" -eq 0 && "$arg" == "--" ]]; then
+    seen_separator=1
+    continue
+  fi
+  if [[ "$seen_separator" -eq 0 ]]; then
+    claude_args+=("$arg")
+  else
+    prompt_parts+=("$arg")
+  fi
+done
+
+if [[ "$seen_separator" -eq 0 ]]; then
+  prompt="$*"
+  exec claude "$context
+
+User request:
+$prompt"
+fi
+
+prompt="${prompt_parts[*]}"
+exec claude "${claude_args[@]}" "$context
+
+User request:
+$prompt"

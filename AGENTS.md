@@ -4,6 +4,22 @@
 
 Agents use Memvid as the shared long-term memory backend. The only write interface is the queue directory. Agents must not invoke a memvid binary, inspect backend working directories, or touch `.mv2` files directly.
 
+## Startup Recall
+
+Agent sessions should be launched through a Memvid wrapper so a bounded startup context packet is injected before normal work begins.
+
+- Codex wrapper: `codex-memvid`
+- Claude wrapper: `claude-memvid`
+- Gemini wrapper: `gemini-memvid`
+- Generic wrapper: `memvid-context-wrap -- <agent command>`
+- Context generator: `memvid-context`
+
+The context packet is a read-only, compressed view of backend-owned source-of-truth stores. It uses chrono-semantic compression: recent records are shown with more detail, and ordinary records reach maximum compression at 7 days old. Semantically critical facts, handoffs, risks, protocol rules, and project matches can survive longer, but still as compact facts.
+
+Agents may read the injected packet. Agents must not open `.mv2` files or backend directories to perform their own recall. If more recall is needed, ask the launcher/user for a narrower `memvid-context --query ...` packet instead of accessing the store directly.
+
+Rotating source-of-truth stores live under `/var/lib/memvid/store/YYYY-MM-DD.mv2`. The injector handles daily rotation by scanning recent stores newest-first and returning source-attributed snippets. Agents do not need to know or manage store rotation.
+
 ## Queue Contract
 
 - Queue path: `/var/lib/memvid/queue/`

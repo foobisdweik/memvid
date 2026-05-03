@@ -44,28 +44,40 @@ pub struct Job {
 }
 
 pub fn move_to_processing(job: &Job, processing_dir: &str) -> Result<Job> {
-    let filename = job.path.file_name().ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
+    let filename = job
+        .path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
     let new_path = PathBuf::from(processing_dir).join(filename);
     fs::rename(&job.path, &new_path)?;
     Ok(Job { path: new_path })
 }
 
 pub fn move_to_ingest(job: &Job, ingest_dir: &str) -> Result<Job> {
-    let filename = job.path.file_name().ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
+    let filename = job
+        .path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
     let new_path = PathBuf::from(ingest_dir).join(filename);
     fs::rename(&job.path, &new_path)?;
     Ok(Job { path: new_path })
 }
 
 pub fn move_to_done(job: &Job, done_dir: &str) -> Result<Job> {
-    let filename = job.path.file_name().ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
+    let filename = job
+        .path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
     let new_path = PathBuf::from(done_dir).join(filename);
     fs::rename(&job.path, &new_path)?;
     Ok(Job { path: new_path })
 }
 
 pub fn move_to_failed(job: &Job, failed_dir: &str) -> Result<Job> {
-    let filename = job.path.file_name().ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
+    let filename = job
+        .path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Job path has no filename"))?;
     let new_path = PathBuf::from(failed_dir).join(filename);
     fs::rename(&job.path, &new_path)?;
     Ok(Job { path: new_path })
@@ -77,10 +89,10 @@ pub fn ensure_directories(settings: &Settings) -> Result<()> {
     fs::create_dir_all(&settings.paths.ingest)?;
     fs::create_dir_all(&settings.paths.done)?;
     fs::create_dir_all(&settings.paths.failed)?;
-    
+
     if let Some(store_parent) = PathBuf::from(&settings.paths.store).parent() {
         fs::create_dir_all(store_parent)?;
     }
-    
+
     Ok(())
 }

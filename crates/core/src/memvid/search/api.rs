@@ -672,7 +672,6 @@ impl Memvid {
         })
     }
 
-
     /// Compute embedding quality statistics for the vector index.
     ///
     /// This analyzes the distribution of embeddings to provide insights about:

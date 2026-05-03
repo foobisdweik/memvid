@@ -3,6 +3,7 @@ members = [
   "crates/core",
   "crates/common",
   "crates/embedder",
-  "crates/ingestor"
+  "crates/ingestor",
+  "crates/migrator"
 ]
 resolver = "2"

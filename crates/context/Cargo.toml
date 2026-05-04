@@ -1,0 +1,12 @@
+[package]
+name = "memvid-context"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+memvid-common = { path = "../common" }
+memvid-core = { path = "../core", features = ["lex"] }
+uuid = { version = "1", features = ["v4"] }

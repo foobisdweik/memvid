@@ -1,10 +1,10 @@
-# Claude Instructions
+# Gemini Instructions
 
-Follow `AGENTS.md`. Claude-specific durable memory is disabled for project facts, architecture, conventions, and handoffs. Write those records to `/var/lib/memvid/queue/` with the atomic queue protocol.
+Follow `AGENTS.md`. Gemini-specific durable memory is disabled for project facts, architecture, conventions, and handoffs. Write those records to `/var/lib/memvid/queue/` with the atomic queue protocol.
 
-Start sessions through a Memvid context wrapper when available. Treat injected Memvid startup context as read-only recall and do not access `.mv2` stores directly.
+Start sessions through `gemini-memvid` when available. Treat injected Memvid startup context as read-only recall and do not access `.mv2` stores directly.
 
-Use `agent:claude` in queued headers.
+Use `agent:gemini` in queued headers.
 
 ## Memvid Queue — Mandatory Checkpoints
 
@@ -13,7 +13,7 @@ Write a queue entry at each trigger below. No exceptions.
 **Write immediately when:**
 - [ ] User confirms a fix works on device or in tests
 - [ ] User explicitly identifies something as a bug (not you)
-- [ ] A decision is finalized — user accepted an approach or you committed code
+- [ ] A decision is finalized — user accepted an approach or code was committed
 - [ ] A file, function, command, or protocol is created or renamed
 - [ ] A task the user assigned is complete
 - [ ] A test produces a concrete, unexpected result that changes direction

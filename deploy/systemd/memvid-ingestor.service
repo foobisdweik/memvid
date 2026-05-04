@@ -1,0 +1,16 @@
+[Unit]
+Description=Memvid queue ingestor
+After=local-fs.target
+
+[Service]
+Type=simple
+User=omen
+Group=omen
+Environment=MEMVID_CONFIG=/etc/memvid/settings.toml
+WorkingDirectory=/var/lib/memvid
+ExecStart=/usr/local/bin/memvid-ingestor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[paths]
+queue = "/var/lib/memvid/queue"
+processing = "/var/lib/memvid/processing"
+ingest = "/var/lib/memvid/ingest"
+done = "/var/lib/memvid/done"
+failed = "/var/lib/memvid/failed"
+store = "/var/lib/memvid/store"
+
+[embedding]
+model_path = "/opt/models/nomic-embed-text-v1/model.onnx"
+tokenizer_path = "/opt/models/nomic-embed-text-v1/tokenizer.json"
+batch_size = 32
+max_length = 512
+
+[ingestion]
+commit_interval = 32

@@ -16,6 +16,7 @@ doc.mv2
 
 
 /target
+/dist
 **/*.rs.bk
 # Cargo.lock - now committed for reproducible CI builds
 .idea
@@ -30,6 +31,7 @@ vector_embedding.txt
 *.txt
 # Exception: SymSpell dictionary files needed for PDF text cleanup
 !data/*.txt
+!crates/core/data/*.txt
 *.docx
 *.doc
 *.pptx
@@ -40,6 +42,8 @@ vector_embedding.txt
 *.json
 
 models/
+.fastembed_cache/
+.firecrawl/
 *.DS_Store
 
 issue_overview.md

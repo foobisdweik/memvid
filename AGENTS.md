@@ -47,6 +47,20 @@ Use the current project name when known. Use `global` for cross-project operatin
 
 ## Standard Write
 
+Preferred — use the helper (handles dedup automatically):
+
+```bash
+memvid-queue-write \
+  --agent "${MEMVID_AGENT:-agent}" \
+  --project "<PROJECT>" \
+  --status "<STATE>" \
+  --type update <<'EOF'
+<concise prose — no header needed, helper adds it>
+EOF
+```
+
+Fallback (if helper unavailable) — raw atomic write, no dedup:
+
 ```bash
 queue=/var/lib/memvid/queue
 tmp=$(mktemp "$queue/.tmp.XXXXXX")
@@ -70,11 +84,22 @@ mv "$tmp" "$queue/$(uuidgen).md"
 
 Write to the queue when:
 
-- Significant decision made.
-- Bug found or fixed.
-- New file, function, command, or convention created.
-- Task completed.
-- Context risk appears: compaction, handoff, model switch, tool switch, or long pause.
+- User confirms a fix works on device or in tests.
+- User explicitly identifies something as a bug (not the agent).
+- A decision is finalized — user accepted an approach or code was committed.
+- A file, function, command, or protocol is created or renamed.
+- A task the user assigned is complete.
+- A test produces a concrete, unexpected result that changes direction.
+- A hard blocker is hit: missing dependency, broken tool, auth failure, device rejection.
+- Session is ending or handing off to another agent.
+- Context compaction is imminent.
+
+Do NOT write for:
+
+- Speculation, hypotheses, or agent suspicions about the code.
+- Behavior inferred without a failing test or user report to back it.
+- Intermediate steps within a single task.
+- Explanations or plans that have not been acted on.
 
 Keep entries concise and high signal. Do not dump large logs, dependency output, generated files, or broad file contents.
 

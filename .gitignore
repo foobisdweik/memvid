@@ -42,6 +42,8 @@ vector_embedding.txt
 *.json
 
 models/
+.fastembed_cache/
+.firecrawl/
 *.DS_Store
 
 issue_overview.md

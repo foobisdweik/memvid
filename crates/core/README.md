@@ -134,7 +134,8 @@ Use Memvid in your preferred language:
 
 ### Requirements
 
--   **Rust 1.85.0+** — Install from [rustup.rs](https://rustup.rs)
+-   **Repository development:** Rust **1.90.0** (pinned in `rust-toolchain.toml`) — install from [rustup.rs](https://rustup.rs)
+-   **Library consumers:** `memvid-core` supports Rust **1.85.0+**
 
 ### Add to Your Project
 

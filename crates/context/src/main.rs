@@ -15,6 +15,9 @@ const DEFAULT_MAX_STORE_DAYS: i64 = 30;
 const DEFAULT_MAX_RECORDS: usize = 48;
 const DEFAULT_COMPRESSION_HORIZON_HOURS: f64 = 168.0;
 const MAX_BODY_READ_BYTES: usize = 256 * 1024;
+const RECENCY_CLIFF_HOURS: f64 = 16.0;
+const RECENT_DETAIL_HOURS: f64 = 4.0;
+const MAX_OLDER_RECORDS: usize = 12;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -151,7 +154,7 @@ fn main() -> Result<()> {
     );
     dedupe_candidates(&mut candidates);
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-    candidates.truncate(args.max_records);
+    candidates = trim_candidates_for_budget(candidates, args.max_records);
 
     let packet = render_packet(RenderInput {
         args: &args,
@@ -449,7 +452,7 @@ fn score_candidate(
     match project_match {
         ProjectMatch::Exact => score += 70.0,
         ProjectMatch::Embedded => score += 62.0,
-        ProjectMatch::Global => score += 8.0,
+        ProjectMatch::Global => score += 4.0,
         ProjectMatch::Other => score += 2.0,
     }
     let record_type = header.get("type").unwrap_or_default();
@@ -468,8 +471,7 @@ fn score_candidate(
         "migrated" => 4.0,
         _ => 4.0,
     };
-    let recency = (1.0 - (age_hours / DEFAULT_COMPRESSION_HORIZON_HOURS)).clamp(0.0, 1.0);
-    score += recency * 22.0;
+    score += recency_bonus(age_hours);
 
     let body_tokens = tokenize(body);
     if !query_tokens.is_empty() && !body_tokens.is_empty() {
@@ -497,6 +499,26 @@ fn score_candidate(
         score += 8.0;
     }
     score
+}
+
+fn recency_bonus(age_hours: f64) -> f64 {
+    if age_hours <= RECENT_DETAIL_HOURS {
+        return 78.0;
+    }
+    if age_hours <= RECENCY_CLIFF_HOURS {
+        let progress =
+            (age_hours - RECENT_DETAIL_HOURS) / (RECENCY_CLIFF_HOURS - RECENT_DETAIL_HOURS);
+        return 78.0 - (progress * 24.0);
+    }
+    if age_hours <= 48.0 {
+        let progress = (age_hours - RECENCY_CLIFF_HOURS) / (48.0 - RECENCY_CLIFF_HOURS);
+        return 18.0 - (progress * 14.0);
+    }
+    if age_hours <= DEFAULT_COMPRESSION_HORIZON_HOURS {
+        let progress = (age_hours - 48.0) / (DEFAULT_COMPRESSION_HORIZON_HOURS - 48.0);
+        return (4.0 - (progress * 4.0)).max(0.0);
+    }
+    0.0
 }
 
 fn query_tokens(project: &str, cwd: &Path, queries: &[String]) -> BTreeSet<String> {
@@ -547,6 +569,30 @@ fn dedupe_candidates(candidates: &mut Vec<Candidate>) {
     });
 }
 
+fn trim_candidates_for_budget(candidates: Vec<Candidate>, max_records: usize) -> Vec<Candidate> {
+    let mut recent = 0usize;
+    let mut older = 0usize;
+    let older_budget = MAX_OLDER_RECORDS.min(max_records);
+    let mut kept = Vec::new();
+
+    for candidate in candidates {
+        if kept.len() >= max_records {
+            break;
+        }
+        if candidate.age_hours <= RECENCY_CLIFF_HOURS {
+            recent += 1;
+            kept.push(candidate);
+            continue;
+        }
+        if older < older_budget || (recent == 0 && kept.len() < max_records) {
+            older += 1;
+            kept.push(candidate);
+        }
+    }
+
+    kept
+}
+
 fn normalize_for_dedupe(text: &str) -> String {
     normalize_ws(text)
         .chars()
@@ -574,6 +620,11 @@ fn render_packet(input: RenderInput<'_>) -> String {
         &mut out,
         input.budget_chars,
         "## Operating Rules\n\nAgents write durable memory only by atomically renaming Markdown files into `/var/lib/memvid/queue`. Do not invoke memvid binaries for writes. Do not touch `.mv2`, `/var/lib/memvid/processing`, `/var/lib/memvid/ingest`, `/var/lib/memvid/done`, `/var/lib/memvid/failed`, or `/var/lib/memvid/store`. Treat this packet as read-only startup recall.\n\n",
+    );
+    push_block(
+        &mut out,
+        input.budget_chars,
+        "## Queue Write Checkpoints\n\nWrite to the queue when a task is complete, code or protocol decisions are finalized, a file/function/command is created or renamed, a concrete blocker or bug is observed, tests change direction, or the session is ending. Use `[project:global]` only for explicit cross-project coordination; ordinary workspace facts stay in the current project shard.\n\n",
     );
 
     let sections = [
@@ -658,7 +709,7 @@ fn classify(candidate: &Candidate) -> Section {
     ) {
         return Section::Risk;
     }
-    if candidate.age_hours <= 24.0 {
+    if candidate.age_hours <= RECENCY_CLIFF_HOURS {
         return Section::Fresh;
     }
     if matches!(candidate.header.get("project"), Some("global")) {
@@ -703,25 +754,27 @@ fn compression_limit(candidate: &Candidate, horizon_hours: f64) -> usize {
     let importance = (candidate.score / 120.0).clamp(0.0, 1.0);
     let resistance = 0.35 * importance;
     let aggression = ((age / horizon_hours).clamp(0.0, 1.0) * (1.0 - resistance)).clamp(0.0, 1.0);
-    let base = if age <= 6.0 {
-        1_600
+    let base = if age <= RECENT_DETAIL_HOURS {
+        1_800
+    } else if age <= RECENCY_CLIFF_HOURS {
+        1_200
     } else if age <= 24.0 {
-        1_000
+        500
     } else if age <= 48.0 {
-        650
+        260
     } else if age <= 96.0 {
-        360
+        180
     } else if age <= horizon_hours {
-        220
-    } else {
         140
+    } else {
+        100
     };
     ((base as f64) * (1.0 - aggression * 0.45)).round() as usize
 }
 
 fn compress_body(body: &str, max_chars: usize, age_hours: f64) -> String {
     let body = strip_markdown_noise(body);
-    if age_hours <= 6.0 {
+    if age_hours <= RECENT_DETAIL_HOURS {
         return truncate_clean(&body, max_chars);
     }
     let lines = informative_lines(&body);
@@ -866,4 +919,57 @@ fn infer_project(cwd: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("global")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(age_hours: f64, score: f64) -> Candidate {
+        Candidate {
+            store: PathBuf::from("/tmp/memvid.mv2"),
+            store_date: None,
+            frame_id: 1,
+            frame_ts: 0,
+            header: Header::default(),
+            body: "body".to_string(),
+            age_hours,
+            score,
+        }
+    }
+
+    #[test]
+    fn recency_bonus_drops_sharply_after_sixteen_hours() {
+        assert!(recency_bonus(2.0) > recency_bonus(12.0));
+        assert!(recency_bonus(12.0) > recency_bonus(20.0));
+        assert!(recency_bonus(20.0) > recency_bonus(72.0));
+        assert!(recency_bonus(20.0) < 20.0);
+    }
+
+    #[test]
+    fn trim_candidates_caps_older_records() {
+        let mut candidates = Vec::new();
+        for _ in 0..20 {
+            candidates.push(candidate(2.0, 100.0));
+        }
+        for _ in 0..40 {
+            candidates.push(candidate(36.0, 90.0));
+        }
+
+        let kept = trim_candidates_for_budget(candidates, 48);
+        let older = kept
+            .iter()
+            .filter(|candidate| candidate.age_hours > RECENCY_CLIFF_HOURS)
+            .count();
+        assert_eq!(kept.len(), 32);
+        assert_eq!(older, MAX_OLDER_RECORDS);
+    }
+
+    #[test]
+    fn classify_treats_sixteen_hour_records_as_fresh() {
+        let fresh = candidate(RECENCY_CLIFF_HOURS, 80.0);
+        let older = candidate(RECENCY_CLIFF_HOURS + 0.1, 80.0);
+        assert_eq!(classify(&fresh), Section::Fresh);
+        assert_ne!(classify(&older), Section::Fresh);
+    }
 }

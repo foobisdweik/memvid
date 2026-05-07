@@ -44,7 +44,7 @@ for bin in memvid-context memvid-embedder memvid-ingestor memvid-migrator; do
   install -m 0755 "$ROOT/target/release/$bin" "$PAYLOAD/bin/$bin"
 done
 
-for wrapper in memvid-context-wrap codex-memvid claude-memvid gemini-memvid; do
+for wrapper in memvid-context-wrap codex-memvid claude-memvid gemini-memvid memvid-queue-write; do
   need_file "$ROOT/deploy/bin/$wrapper"
   install -m 0755 "$ROOT/deploy/bin/$wrapper" "$PAYLOAD/bin/$wrapper"
 done
@@ -60,6 +60,8 @@ for doc in AGENTS.md CLAUDE.md GEMINI.md; do
 done
 need_file "$ROOT/docs/memvid-context.md"
 install -m 0644 "$ROOT/docs/memvid-context.md" "$PAYLOAD/docs/memvid-context.md"
+need_file "$ROOT/docs/memvid-librarian.md"
+install -m 0644 "$ROOT/docs/memvid-librarian.md" "$PAYLOAD/docs/memvid-librarian.md"
 install -m 0755 "$ROOT/packaging/install-payload.sh" "$PAYLOAD/install.sh"
 
 MODEL_ONNX="${MEMVID_MODEL_ONNX:-/opt/models/nomic-embed-text-v1/model.onnx}"

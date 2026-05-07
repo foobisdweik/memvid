@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  memvid-queue-write --agent NAME --project PROJECT --status STATUS --type TYPE
+
+Reads the Markdown body from stdin and atomically writes a queue record using the
+configured Memvid queue directory.
+EOF
+}
+
+settings_path="${MEMVID_CONFIG:-/etc/memvid/settings.toml}"
+queue_dir="${MEMVID_QUEUE_DIR:-}"
+agent="${MEMVID_AGENT:-agent}"
+project=""
+status=""
+record_type="update"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent)
+      agent="${2:?--agent requires a value}"
+      shift 2
+      ;;
+    --project)
+      project="${2:?--project requires a value}"
+      shift 2
+      ;;
+    --status)
+      status="${2:?--status requires a value}"
+      shift 2
+      ;;
+    --type)
+      record_type="${2:?--type requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$queue_dir" ]]; then
+  if [[ ! -f "$settings_path" ]]; then
+    echo "Memvid settings not found: $settings_path" >&2
+    exit 1
+  fi
+  queue_dir="$(
+    awk -F'=' '
+      $1 ~ /^[[:space:]]*queue[[:space:]]*$/ {
+        gsub(/"/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        print $2
+        exit
+      }
+    ' "$settings_path"
+  )"
+fi
+
+if [[ -z "$project" || -z "$status" || -z "$queue_dir" ]]; then
+  echo "--project, --status, and a configured queue path are required" >&2
+  exit 1
+fi
+
+body="$(cat)"
+timestamp="$(date +%s%N)"
+
+if command -v uuidgen >/dev/null 2>&1; then
+  uuid="$(uuidgen)"
+elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+  uuid="$(cat /proc/sys/kernel/random/uuid)"
+else
+  uuid="$(openssl rand -hex 16)"
+fi
+
+mkdir -p "$queue_dir"
+tmp_path="$queue_dir/.tmp.$uuid"
+final_path="$queue_dir/$uuid.md"
+
+{
+  printf '[agent:%s]\n' "$agent"
+  printf '[status:%s]\n' "$status"
+  printf '[type:%s]\n' "$record_type"
+  printf '[project:%s]\n' "$project"
+  printf '[timestamp:%s]\n\n' "$timestamp"
+  printf '%s\n' "$body"
+} > "$tmp_path"
+
+chmod 0644 "$tmp_path"
+mv "$tmp_path" "$final_path"

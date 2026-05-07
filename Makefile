@@ -5,7 +5,7 @@
 
 # Variables
 CARGO := cargo
-RUST_VERSION := 1.85.0
+RUST_VERSION := $(shell sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
 FEATURES := lex,pdf_extract
 
 # Colors for output

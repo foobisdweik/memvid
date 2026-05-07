@@ -330,7 +330,7 @@ install_files() {
   run install -o root -g root -m 0755 "$SELF_DIR/bin/"* "$PREFIX/bin/"
   run install -o root -g root -m 0644 "$SELF_DIR/lib/"*.so "$PREFIX/lib/memvid/"
   run install -o root -g root -m 0644 "$SELF_DIR/docs/AGENTS.md" "$SELF_DIR/docs/CLAUDE.md" "$SELF_DIR/docs/GEMINI.md" "$PREFIX/share/memvid/"
-  run install -o root -g root -m 0644 "$SELF_DIR/docs/memvid-context.md" "$PREFIX/share/memvid/docs/"
+  run install -o root -g root -m 0644 "$SELF_DIR/docs/memvid-context.md" "$SELF_DIR/docs/memvid-librarian.md" "$PREFIX/share/memvid/docs/"
   run install -o root -g root -m 0644 "$SELF_DIR/model/model.onnx" "$MODEL_DIR/model.onnx"
   run install -o root -g root -m 0644 "$SELF_DIR/model/tokenizer.json" "$MODEL_DIR/tokenizer.json"
   run install -o root -g root -m 0644 "$SELF_DIR/source/memvid-source.tar" "$PREFIX/share/memvid/memvid-source.tar"
@@ -441,6 +441,7 @@ alias codex-raw='command codex'
 alias claude-raw='command claude'
 alias gemini-raw='command gemini'
 alias memctx='memvid-context'
+alias memq='memvid-queue-write'
 EOF
 }
 
@@ -467,6 +468,7 @@ verify_install() {
     "$PREFIX/bin/codex-memvid"
     "$PREFIX/bin/claude-memvid"
     "$PREFIX/bin/gemini-memvid"
+    "$PREFIX/bin/memvid-queue-write"
     "$CONFIG_DIR/settings.toml"
     "$MODEL_DIR/model.onnx"
     "$MODEL_DIR/tokenizer.json"

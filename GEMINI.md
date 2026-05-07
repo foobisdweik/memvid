@@ -5,6 +5,7 @@ Follow `AGENTS.md`. Gemini-specific durable memory is disabled for project facts
 Start sessions through `gemini-memvid` when available. Treat injected Memvid startup context as read-only recall and do not access `.mv2` stores directly.
 
 Use `agent:gemini` in queued headers.
+Use `[project:global]` only for explicit cross-project coordination. Ordinary workspace facts belong to the current project shard.
 
 ## Memvid Queue — Mandatory Checkpoints
 
@@ -30,3 +31,10 @@ Write a queue entry at each trigger below. No exceptions.
 - Explanations or plans that haven't been acted on
 
 One entry per logical unit. Do not batch unrelated facts.
+Prefer the helper when available:
+
+```bash
+memvid-queue-write --agent gemini --project <project> --status done --type update <<'EOF'
+<concise durable update>
+EOF
+```

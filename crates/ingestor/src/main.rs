@@ -1,45 +1,40 @@
-use anyhow::{Context, Result};
-use chrono::Utc;
+use anyhow::{Context, Result, anyhow};
 use memvid_common::*;
 use memvid_core::{Memvid, PutOptions};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
-struct RolloverStore {
-    base_dir: PathBuf,
-    current_date: String,
+struct ShardStore {
     memvid: Memvid,
     counter: usize,
+}
+
+struct ProjectShardStores {
+    base_dir: PathBuf,
+    shards: BTreeMap<String, ShardStore>,
     commit_interval: usize,
 }
 
-impl RolloverStore {
+impl ProjectShardStores {
     fn new(base_dir: PathBuf, commit_interval: usize) -> Result<Self> {
-        let current_date = Utc::now().format("%Y-%m-%d").to_string();
-        let memvid = Self::open_or_create(&base_dir, &current_date)?;
-
         Ok(Self {
             base_dir,
-            current_date,
-            memvid,
-            counter: 0,
+            shards: BTreeMap::new(),
             commit_interval,
         })
     }
 
-    fn open_or_create(base_dir: &Path, date: &str) -> Result<Memvid> {
-        let filename = format!("{}.mv2", date);
-        let path = base_dir.join(&filename);
-
+    fn open_or_create(path: &Path) -> Result<Memvid> {
         if path.exists() {
-            println!("Opening existing memory for today: {}", path.display());
-            Ok(Memvid::open(&path)?)
+            println!("Opening existing memory shard: {}", path.display());
+            Ok(Memvid::open(path)?)
         } else {
-            println!("Creating new memory for today: {}", path.display());
-            let mut mem = Memvid::create(&path)?;
+            println!("Creating memory shard: {}", path.display());
+            let mut mem = Memvid::create(path)?;
             mem.enable_vec()?;
             mem.enable_lex()?;
             mem.commit()?;
@@ -47,48 +42,49 @@ impl RolloverStore {
         }
     }
 
-    fn check_rollover(&mut self) -> Result<()> {
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        if self.current_date != today {
-            println!(
-                "Rolling over memory file from {} to {}",
-                self.current_date, today
-            );
-            // Force a commit on the old file before switching
-            if self.counter > 0 {
-                self.memvid.commit()?;
-                self.counter = 0;
-            }
-
-            // The old Memvid instance is dropped, which is safe.
-            self.memvid = Self::open_or_create(&self.base_dir, &today)?;
-            self.current_date = today;
+    fn shard_mut(&mut self, shard: &str) -> Result<&mut ShardStore> {
+        if !self.shards.contains_key(shard) {
+            let path = self.base_dir.join(format!("{shard}.mv2"));
+            let memvid = Self::open_or_create(&path)?;
+            self.shards
+                .insert(shard.to_string(), ShardStore { memvid, counter: 0 });
         }
-        Ok(())
+        self.shards
+            .get_mut(shard)
+            .ok_or_else(|| anyhow!("shard store disappeared for {shard}"))
     }
 
-    fn ingest(&mut self, data: &[u8], embedding: Vec<f32>, source_uri: &str) -> Result<()> {
-        self.check_rollover()?;
+    fn ingest(&mut self, data: &[u8], embedding: Vec<f32>, source_name: &str) -> Result<String> {
+        let text = std::str::from_utf8(data).context("queue record is not valid UTF-8 Markdown")?;
+        let project = extract_project_header(text)
+            .ok_or_else(|| anyhow!("queue record is missing a [project:...] header"))?;
+        let shard = shard_name_for_project(project)?;
+        let source_uri = format!("mv2://ingest/{shard}/{source_name}");
+        let opts = PutOptions::builder().uri(&source_uri).build();
 
-        let opts = PutOptions::builder().uri(source_uri).build();
-
-        self.memvid
+        let commit_interval = self.commit_interval;
+        let store = self.shard_mut(&shard)?;
+        store
+            .memvid
             .put_with_embedding_and_options(data, embedding, opts)?;
-        self.counter += 1;
+        store.counter += 1;
 
-        if self.counter >= self.commit_interval {
-            self.memvid.commit()?;
-            self.counter = 0;
-            println!("Committed batch.");
+        if store.counter >= commit_interval {
+            store.memvid.commit()?;
+            store.counter = 0;
+            println!("Committed shard batch: {shard}");
         }
-        Ok(())
+
+        Ok(shard)
     }
 
     fn commit_pending(&mut self) -> Result<()> {
-        if self.counter > 0 {
-            self.memvid.commit()?;
-            self.counter = 0;
-            println!("Committed idle batch.");
+        for (shard, store) in &mut self.shards {
+            if store.counter > 0 {
+                store.memvid.commit()?;
+                store.counter = 0;
+                println!("Committed idle shard batch: {shard}");
+            }
         }
         Ok(())
     }
@@ -100,7 +96,7 @@ fn main() -> Result<()> {
     let settings = load_settings(&settings_path)?;
     ensure_directories(&settings)?;
 
-    let mut store = RolloverStore::new(
+    let mut stores = ProjectShardStores::new(
         PathBuf::from(&settings.paths.store),
         settings.ingestion.commit_interval,
     )?;
@@ -121,7 +117,6 @@ fn main() -> Result<()> {
             }
 
             let path = entry.path();
-            // We only trigger when we see the .emb file to ensure the pair is ready.
             if path.extension().and_then(|s| s.to_str()) != Some("emb") {
                 continue;
             }
@@ -140,24 +135,28 @@ fn main() -> Result<()> {
                 bincode::deserialize(&emb_bytes).context("Failed to deserialize embedding")?;
 
             let data = fs::read(&text_path).context("Failed to read text file")?;
-            let uri = format!(
-                "mv2://ingest/{}",
-                text_path.file_name().unwrap().to_string_lossy()
-            );
+            let source_name = text_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown.md")
+                .to_string();
 
-            match store.ingest(&data, embedding, &uri) {
-                Ok(_) => {
-                    // Move to done
-                    let job = Job { path: text_path };
+            match stores.ingest(&data, embedding, &source_name) {
+                Ok(shard) => {
+                    let job = Job {
+                        path: text_path.clone(),
+                    };
                     move_to_done(&job, &settings.paths.done).ok();
-                    // Just delete the .emb file as we don't need it anymore
                     fs::remove_file(&emb_path).ok();
                     processed_any = true;
                     last_processed = Instant::now();
+                    println!("Ingested {} into shard {}", source_name, shard);
                 }
                 Err(e) => {
-                    println!("Failed to ingest {}: {}", uri, e);
-                    let job = Job { path: text_path };
+                    println!("Failed to ingest {}: {}", source_name, e);
+                    let job = Job {
+                        path: text_path.clone(),
+                    };
                     move_to_failed(&job, &settings.paths.failed).ok();
                     fs::remove_file(&emb_path).ok();
                 }
@@ -166,7 +165,7 @@ fn main() -> Result<()> {
 
         if !processed_any {
             if last_processed.elapsed() >= Duration::from_secs(2) {
-                if let Err(err) = store.commit_pending() {
+                if let Err(err) = stores.commit_pending() {
                     eprintln!("Failed to commit idle batch: {err}");
                 }
                 last_processed = Instant::now();
@@ -180,4 +179,122 @@ fn text_path_for_embedding(emb_path: &Path) -> Option<PathBuf> {
     let filename = emb_path.file_name()?.to_str()?;
     let text_filename = filename.strip_suffix(".emb")?;
     Some(emb_path.with_file_name(text_filename))
+}
+
+fn extract_project_header(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(inner) = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        else {
+            break;
+        };
+        let Some((key, value)) = inner.split_once(':') else {
+            break;
+        };
+        if key.trim().eq_ignore_ascii_case("project") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn shard_name_for_project(project: &str) -> Result<String> {
+    let project = project.trim();
+    if project.is_empty() {
+        return Err(anyhow!("project header is empty"));
+    }
+    if project.eq_ignore_ascii_case("global") {
+        return Ok("global".to_string());
+    }
+
+    let mut shard = String::new();
+    let mut last_dash = false;
+    for ch in project.chars() {
+        if ch.is_ascii_alphanumeric() {
+            shard.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            shard.push('-');
+            last_dash = true;
+        }
+    }
+
+    let shard = shard.trim_matches('-').to_string();
+    if shard.is_empty() {
+        return Err(anyhow!(
+            "project header did not contain any usable filename characters"
+        ));
+    }
+
+    Ok(shard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn parses_project_header_from_queue_record() {
+        let text = "[agent:codex]\n[status:done]\n[project:memvid]\n\nbody";
+        assert_eq!(extract_project_header(text), Some("memvid"));
+    }
+
+    #[test]
+    fn ignores_project_mentions_outside_header() {
+        let text = "memvid appears in the body only";
+        assert_eq!(extract_project_header(text), None);
+    }
+
+    #[test]
+    fn shard_name_is_stable_and_sanitized() {
+        assert_eq!(shard_name_for_project("Memvid").unwrap(), "memvid");
+        assert_eq!(
+            shard_name_for_project("Customer Support/API").unwrap(),
+            "customer-support-api"
+        );
+        assert_eq!(shard_name_for_project("global").unwrap(), "global");
+    }
+
+    #[test]
+    fn invalid_project_names_fail() {
+        assert!(shard_name_for_project("   ").is_err());
+        assert!(shard_name_for_project("///").is_err());
+    }
+
+    #[test]
+    fn ingests_into_project_and_global_shards() {
+        let dir = tempdir().unwrap();
+        let mut stores = ProjectShardStores::new(dir.path().to_path_buf(), 1).unwrap();
+
+        let project_record =
+            b"[agent:codex]\n[status:done]\n[type:update]\n[project:memvid]\n\nproject body";
+        let global_record =
+            b"[agent:codex]\n[status:done]\n[type:update]\n[project:global]\n\nglobal body";
+
+        stores
+            .ingest(project_record, vec![0.1, 0.2], "project.md")
+            .unwrap();
+        stores
+            .ingest(global_record, vec![0.3, 0.4], "global.md")
+            .unwrap();
+        stores.commit_pending().unwrap();
+
+        let project_path = dir.path().join("memvid.mv2");
+        let global_path = dir.path().join("global.mv2");
+
+        assert!(project_path.exists());
+        assert!(global_path.exists());
+        assert_eq!(Memvid::open(&project_path).unwrap().frame_count(), 1);
+        assert_eq!(Memvid::open(&global_path).unwrap().frame_count(), 1);
+    }
 }

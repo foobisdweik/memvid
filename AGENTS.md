@@ -1,141 +1,44 @@
-# Universal Agent Instructions
 
-## Memvid Queue Protocol
+```PRIME DIRECTIVE
+Respond like smart caveman. Cut all filler, keep technical substance.
+- Drop articles (a, an, the), filler (just, really, basically, actually).
+- Drop pleasantries (sure, certainly, happy to).
+- No hedging. Fragments fine. Short synonyms.
+- Technical terms stay exact. Code blocks unchanged.
+- Pattern: [thing] [action] [reason]. [next step].
+---
 
-Agents use Memvid as the shared long-term memory backend. The only write interface is the queue directory. Agents must not invoke a memvid binary, inspect backend working directories, or touch `.mv2` files directly.
+# Repository Guidelines
 
-## Startup Recall
+## Project Structure & Module Organization
 
-Agent sessions should be launched through a Memvid wrapper so a bounded startup context packet is injected before normal work begins.
+This is a Rust workspace. Core library code lives in `crates/core/src`, with integration tests in `crates/core/tests` and examples in `crates/core/examples`. Supporting binaries are split into focused crates: `crates/context` for startup recall, `crates/embedder` and `crates/ingestor` for queue processing, `crates/migrator` for legacy imports, and `crates/common` for shared settings and filesystem helpers. Deployment assets live in `deploy/`, installer packaging in `packaging/` and `install/`, Docker files in `docker/`, and user-facing docs in `docs/`.
 
-- Codex wrapper: `codex-memvid`
-- Claude wrapper: `claude-memvid`
-- Gemini wrapper: `gemini-memvid`
-- Generic wrapper: `memvid-context-wrap -- <agent command>`
-- Context generator: `memvid-context`
+## Build, Test, and Development Commands
 
-The context packet is a read-only, compressed view of backend-owned source-of-truth stores. It uses chrono-semantic compression: recent records are shown with more detail, and ordinary records reach maximum compression at 7 days old. Semantically critical facts, handoffs, risks, protocol rules, and project matches can survive longer, but still as compact facts.
+- `make check` runs `cargo check --features lex,pdf_extract`.
+- `make build` builds the workspace in debug mode.
+- `make build-release` builds optimized release artifacts.
+- `make test` runs the default test suite.
+- `make test-integration` runs selected integration tests such as lifecycle, search, mutation, and recovery.
+- `make fmt-check` verifies formatting without rewriting files.
+- `make clippy` runs Clippy for all targets with warnings denied.
+- `make verify` runs check, formatting, Clippy, and tests.
 
-Agents may read the injected packet. Agents must not open `.mv2` files or backend directories to perform their own recall. If more recall is needed, ask the launcher/user for a narrower `memvid-context --query ...` packet instead of accessing the store directly.
+Use direct Cargo commands for crate-specific work, for example `cargo test -p memvid-core search --features lex,pdf_extract`.
 
-Rotating source-of-truth stores live under `/var/lib/memvid/store/YYYY-MM-DD.mv2`. The injector handles daily rotation by scanning recent stores newest-first and returning source-attributed snippets. Agents do not need to know or manage store rotation.
+## Coding Style & Naming Conventions
 
-## Queue Contract
+Use standard Rust formatting via `cargo fmt --all`. Follow idiomatic Rust naming: modules and functions use `snake_case`, types use `UpperCamelCase`, and constants use `SCREAMING_SNAKE_CASE`. Keep crates focused on their domain and prefer shared helpers in `crates/common` only when behavior is genuinely reused. Avoid unrelated formatting churn in large generated or data files.
 
-- Queue path: `/var/lib/memvid/queue/`
-- Backend paths are reserved: `/var/lib/memvid/processing/`, `/var/lib/memvid/ingest/`, `/var/lib/memvid/done/`, `/var/lib/memvid/failed/`, `/var/lib/memvid/store/`
-- Write pure Markdown only.
-- Write atomically: create a hidden temp file in the queue, then rename it into place.
-- Use UUID filenames. Do not rely on timestamps alone for uniqueness.
-- Maximum queue file size: 256 KB unless the user explicitly overrides this for a specific migration or diagnostic task.
-- If the queue exceeds 10,000 files, slow write frequency and prefer a single handoff/update over many small files.
-- After a file is renamed into the queue, do not retry, edit, delete, or move it. The backend owns eventual processing or failure handling.
+## Testing Guidelines
 
-## Metadata Header
+Put integration tests under `crates/core/tests` with descriptive snake-case file names. Add focused tests for search, lifecycle, mutation, recovery, and format compatibility when touching those paths. Run `make test` before broad changes and `make verify` before submitting. Some fixtures are optional; tests should skip cleanly when large external assets are absent.
 
-Every queued Markdown file starts with this header:
+## Commit & Pull Request Guidelines
 
-```text
-[agent:<agent-name>]
-[status:in-progress|done|handing-off|error|migrated]
-[type:update|handoff|error|import]
-[project:<project-or-global>]
-[timestamp:<unix_ns>]
-```
+Recent history uses concise, imperative subjects, often with a scope or prefix, such as `fix: ...`, `docs(i18n): ...`, or `Tune context recall scoring`. Keep commits focused and mention user-visible behavior when relevant. Pull requests should include a short summary, tests run, linked issues, and any operational notes for installers, systemd services, Docker, or memory-store compatibility.
 
-Use the current project name when known. Use `global` for cross-project operating context.
+## Security & Configuration Tips
 
-## Standard Write
-
-Preferred — use the helper (handles dedup automatically):
-
-```bash
-memvid-queue-write \
-  --agent "${MEMVID_AGENT:-agent}" \
-  --project "<PROJECT>" \
-  --status "<STATE>" \
-  --type update <<'EOF'
-<concise prose — no header needed, helper adds it>
-EOF
-```
-
-Fallback (if helper unavailable) — raw atomic write, no dedup:
-
-```bash
-queue=/var/lib/memvid/queue
-tmp=$(mktemp "$queue/.tmp.XXXXXX")
-timestamp=$(date +%s%N)
-
-cat > "$tmp" <<EOF
-[agent:${AGENT_NAME:-agent}]
-[status:<STATE>]
-[type:update]
-[project:<PROJECT>]
-[timestamp:$timestamp]
-
-<concise prose or task output>
-EOF
-
-chmod 0644 "$tmp"
-mv "$tmp" "$queue/$(uuidgen).md"
-```
-
-## Mandatory Write Triggers
-
-Write to the queue when:
-
-- User confirms a fix works on device or in tests.
-- User explicitly identifies something as a bug (not the agent).
-- A decision is finalized — user accepted an approach or code was committed.
-- A file, function, command, or protocol is created or renamed.
-- A task the user assigned is complete.
-- A test produces a concrete, unexpected result that changes direction.
-- A hard blocker is hit: missing dependency, broken tool, auth failure, device rejection.
-- Session is ending or handing off to another agent.
-- Context compaction is imminent.
-
-Do NOT write for:
-
-- Speculation, hypotheses, or agent suspicions about the code.
-- Behavior inferred without a failing test or user report to back it.
-- Intermediate steps within a single task.
-- Explanations or plans that have not been acted on.
-
-Keep entries concise and high signal. Do not dump large logs, dependency output, generated files, or broad file contents.
-
-## Handoff
-
-```bash
-queue=/var/lib/memvid/queue
-tmp=$(mktemp "$queue/.tmp.XXXXXX")
-timestamp=$(date +%s%N)
-
-cat > "$tmp" <<EOF
-[agent:${AGENT_NAME:-agent}]
-[status:handing-off]
-[type:handoff]
-[project:<PROJECT>]
-[timestamp:$timestamp]
-
-## Handoff
-
-### Accomplished
-<description>
-
-### State
-<files, commands, open bugs>
-
-### Next
-<actions for next agent>
-EOF
-
-chmod 0644 "$tmp"
-mv "$tmp" "$queue/${timestamp}_handoff_$(uuidgen).md"
-```
-
-## Memory Boundaries
-
-- Do not use native agent memory for project facts, architecture, or conventions when the queue is available.
-- Do not create persistent agent-specific memory files unless required for tool startup.
-- If an agent requires a local instruction file to run, keep it limited to this protocol and route durable knowledge through Memvid.
-- Search or inspect ordinary project files only as needed for the current task; do not use broad reads as a memory substitute.
+Default service paths are configured in `config/settings.toml` under `/var/lib/memvid`. Do not commit local stores, queues, model files, credentials, or generated `.mv2` memory artifacts.

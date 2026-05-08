@@ -32,22 +32,52 @@ Output must be machine-checkable:
 }
 ```
 
-`memvid-context` must reject malformed output and fall back to heuristic recall.
+`selected_ids` must contain only candidate IDs and should stay small. Default maximum is 6. `dropped_ids` must include every non-selected candidate with one reason from: `duplicate`, `stale_superseded`, `resolved_done`, `wrong_project`, `global_not_needed`, `low_signal`, `too_old`, `unknown`.
+
+`memvid-context` rejects malformed output, unknown IDs, duplicate IDs, missing drop reasons, over-selection, and empty selections. Rejection falls back to heuristic recall.
 
 ## Runtime Boundary
 
 Model choice is external research. Framework requirements:
 
 - runs locally on commodity 8GB VRAM
-- supports deterministic-ish low-temperature instruction following
-- accepts candidate cards through CLI or localhost HTTP
+- supports low-temperature JSON instruction following
+- accepts candidate cards through OpenAI-compatible localhost HTTP
 - returns JSON within startup latency budget
 - never receives unrelated project shards
 
+Default Ollama profile for `qwen3:8b` uses 12 candidates, max 6 selected records, 20s timeout, 512 output tokens, `temperature = 0.0`, `top_p = 1.0`, `presence_penalty = 1.5`, and `/no_think` in the user prompt.
+
 ## Admin Workflow
 
-1. Add config keys for librarian enablement, command or endpoint, timeout, and max candidate count.
-2. Add `memvid-context --librarian` plus default-off settings.
-3. Log selected and dropped IDs for comparison against heuristic recall.
-4. Keep heuristic recall as default until repeated startup packets prove better quality.
-5. Add smoke tests with a fake librarian binary that returns valid, malformed, and timeout responses.
+1. Use `memvid-context --no-librarian` for heuristic baseline packets.
+2. Use default config for librarian packets.
+3. Compare selected IDs, packet size, JSON parse success, fallback count, and repeated-run stability.
+4. Keep generated `.mv2` fixtures under `target/librarian-eval`; commit Markdown fixture records only.
+5. Add a local proxy later to capture request/response and test valid, malformed, and timeout paths.
+
+## Manual Tuning Loop
+
+Build once:
+
+```bash
+cargo build -p memvid-context
+```
+
+Compare packets:
+
+```bash
+target/debug/memvid-context --project memvid --no-librarian --query "active bug next step" > /tmp/heuristic.md
+target/debug/memvid-context --project memvid --query "active bug next step" > /tmp/librarian.md
+diff -u /tmp/heuristic.md /tmp/librarian.md
+```
+
+Run repeated librarian packets when changing prompt or runtime settings:
+
+```bash
+for i in 1 2 3; do
+  target/debug/memvid-context --project memvid --query "active bug next step" > "/tmp/librarian-$i.md"
+done
+```
+
+Accept tuning only when repeated packets preserve required current-state records, avoid wrong-project/global noise, stay inside budget, and do not fall back unexpectedly.

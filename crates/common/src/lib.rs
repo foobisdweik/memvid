@@ -10,6 +10,8 @@ pub struct Settings {
     pub paths: Paths,
     pub embedding: Embedding,
     pub ingestion: Ingestion,
+    #[serde(default)]
+    pub librarian: Option<Librarian>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -33,6 +35,56 @@ pub struct Embedding {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Ingestion {
     pub commit_interval: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Librarian {
+    #[serde(default)]
+    pub enabled: bool,
+    pub endpoint: String,
+    pub model: String,
+    #[serde(default = "default_librarian_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_librarian_max_candidates")]
+    pub max_candidates: usize,
+    #[serde(default = "default_librarian_max_selected")]
+    pub max_selected: usize,
+    #[serde(default = "default_librarian_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default = "default_librarian_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_librarian_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_librarian_presence_penalty")]
+    pub presence_penalty: f32,
+}
+
+fn default_librarian_timeout_ms() -> u64 {
+    20_000
+}
+
+fn default_librarian_max_candidates() -> usize {
+    12
+}
+
+fn default_librarian_max_selected() -> usize {
+    6
+}
+
+fn default_librarian_max_tokens() -> usize {
+    512
+}
+
+fn default_librarian_temperature() -> f32 {
+    0.0
+}
+
+fn default_librarian_top_p() -> f32 {
+    1.0
+}
+
+fn default_librarian_presence_penalty() -> f32 {
+    1.5
 }
 
 pub fn load_settings(path: &str) -> Result<Settings> {

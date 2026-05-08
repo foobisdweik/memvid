@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::Parser;
-use memvid_common::{load_settings, settings_path_from_env};
+use memvid_common::{load_settings, settings_path_from_env, Librarian};
 use memvid_core::{FrameStatus, Memvid};
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use uuid::Uuid;
 
 const DEFAULT_BUDGET_TOKENS: usize = 4_000;
@@ -73,6 +76,34 @@ struct Args {
     /// Allow records from projects other than the current project and global.
     #[arg(long)]
     include_other_projects: bool,
+
+    /// Enable librarian reranking for startup recall.
+    #[arg(long)]
+    librarian: bool,
+
+    /// Disable librarian reranking even when config enables it.
+    #[arg(long)]
+    no_librarian: bool,
+
+    /// Override the librarian endpoint.
+    #[arg(long)]
+    librarian_endpoint: Option<String>,
+
+    /// Override the librarian model.
+    #[arg(long)]
+    librarian_model: Option<String>,
+
+    /// Override librarian timeout in milliseconds.
+    #[arg(long)]
+    librarian_timeout_ms: Option<u64>,
+
+    /// Override the number of candidates sent to librarian.
+    #[arg(long)]
+    librarian_max_candidates: Option<usize>,
+
+    /// Override maximum records the librarian may select.
+    #[arg(long)]
+    librarian_max_selected: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +133,27 @@ struct Candidate {
     body: String,
     age_hours: f64,
     score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct LibrarianRuntime {
+    endpoint: String,
+    model: String,
+    timeout_ms: u64,
+    max_candidates: usize,
+    max_selected: usize,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    presence_penalty: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LibrarianResult {
+    active: bool,
+    brief: Option<String>,
+    selected_ids: Vec<String>,
+    warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +207,18 @@ fn main() -> Result<()> {
     dedupe_candidates(&mut candidates);
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     candidates = trim_candidates_for_budget(candidates, args.max_records);
+    let librarian = librarian_runtime(&args, settings.librarian.as_ref());
+    let librarian_result = if let Some(runtime) = librarian.as_ref() {
+        rerank_with_librarian(runtime, &project, &cwd, &args.queries, &candidates)
+    } else {
+        LibrarianResult::default()
+    };
+    if librarian_result.active && !librarian_result.selected_ids.is_empty() {
+        candidates = apply_librarian_selection(candidates, &librarian_result.selected_ids);
+    }
+    if let Some(warning) = librarian_result.warning.as_ref() {
+        errors.push(format!("librarian: {warning}"));
+    }
 
     let packet = render_packet(RenderInput {
         args: &args,
@@ -165,6 +229,7 @@ fn main() -> Result<()> {
         candidates: &candidates,
         errors: &errors,
         budget_chars,
+        librarian: &librarian_result,
     });
     print!("{packet}");
     Ok(())
@@ -179,6 +244,74 @@ struct RenderInput<'a> {
     candidates: &'a [Candidate],
     errors: &'a [String],
     budget_chars: usize,
+    librarian: &'a LibrarianResult,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<OpenAiMessage<'a>>,
+    temperature: f32,
+    top_p: f32,
+    presence_penalty: f32,
+    max_tokens: usize,
+    stream: bool,
+    response_format: ResponseFormat,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiResponseMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseMessage {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LibrarianReply {
+    selected_ids: Vec<String>,
+    session_brief: String,
+    dropped_ids: Vec<DroppedRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DroppedRecord {
+    id: String,
+    reason: DropReason,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum DropReason {
+    Duplicate,
+    StaleSuperseded,
+    ResolvedDone,
+    WrongProject,
+    GlobalNotNeeded,
+    LowSignal,
+    TooOld,
+    Unknown,
 }
 
 fn discover_stores(store_dir: &Path, max_store_days: i64) -> Result<Vec<StorePath>> {
@@ -275,6 +408,374 @@ fn is_project_visible(project_match: ProjectMatch) -> bool {
         project_match,
         ProjectMatch::Exact | ProjectMatch::Embedded | ProjectMatch::Global
     )
+}
+
+fn librarian_runtime(args: &Args, configured: Option<&Librarian>) -> Option<LibrarianRuntime> {
+    let enabled =
+        !args.no_librarian && (args.librarian || configured.is_some_and(|cfg| cfg.enabled));
+    if !enabled {
+        return None;
+    }
+
+    let endpoint = args
+        .librarian_endpoint
+        .clone()
+        .or_else(|| configured.map(|cfg| cfg.endpoint.clone()))
+        .unwrap_or_else(|| "http://127.0.0.1:11434/v1/chat/completions".to_string());
+    let model = args
+        .librarian_model
+        .clone()
+        .or_else(|| configured.map(|cfg| cfg.model.clone()))
+        .unwrap_or_else(|| "qwen3:8b".to_string());
+    let timeout_ms = args
+        .librarian_timeout_ms
+        .or_else(|| configured.map(|cfg| cfg.timeout_ms))
+        .unwrap_or(8_000);
+    let max_candidates = args
+        .librarian_max_candidates
+        .or_else(|| configured.map(|cfg| cfg.max_candidates))
+        .unwrap_or(12)
+        .max(1);
+    let max_selected = args
+        .librarian_max_selected
+        .or_else(|| configured.map(|cfg| cfg.max_selected))
+        .unwrap_or(6)
+        .max(1);
+    let max_tokens = configured.map(|cfg| cfg.max_tokens).unwrap_or(256).max(64);
+    let temperature = configured.map(|cfg| cfg.temperature).unwrap_or(0.0);
+    let top_p = configured.map(|cfg| cfg.top_p).unwrap_or(1.0);
+    let presence_penalty = configured.map(|cfg| cfg.presence_penalty).unwrap_or(1.5);
+
+    Some(LibrarianRuntime {
+        endpoint,
+        model,
+        timeout_ms,
+        max_candidates,
+        max_selected,
+        max_tokens,
+        temperature,
+        top_p,
+        presence_penalty,
+    })
+}
+
+fn rerank_with_librarian(
+    runtime: &LibrarianRuntime,
+    project: &str,
+    cwd: &Path,
+    queries: &[String],
+    candidates: &[Candidate],
+) -> LibrarianResult {
+    if candidates.is_empty() {
+        return LibrarianResult {
+            active: true,
+            warning: Some("no candidates available for librarian".to_string()),
+            ..Default::default()
+        };
+    }
+    if candidates.len() == 1 {
+        return LibrarianResult {
+            active: true,
+            selected_ids: vec![candidate_id(&candidates[0])],
+            ..Default::default()
+        };
+    }
+
+    let chosen: Vec<&Candidate> = candidates.iter().take(runtime.max_candidates).collect();
+    let prompt = librarian_prompt(project, cwd, queries, &chosen);
+    let client = match Client::builder()
+        .timeout(Duration::from_millis(runtime.timeout_ms))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return LibrarianResult {
+                active: true,
+                warning: Some(format!("client init failed: {err}")),
+                ..Default::default()
+            };
+        }
+    };
+    let req = OpenAiChatRequest {
+        model: &runtime.model,
+        messages: vec![
+            OpenAiMessage {
+                role: "system",
+                content: "You are Memvid librarian for startup recall pruning. Return exactly one JSON object. No markdown. No prose before or after JSON. No extra keys.",
+            },
+            OpenAiMessage {
+                role: "user",
+                content: &prompt,
+            },
+        ],
+        temperature: runtime.temperature,
+        top_p: runtime.top_p,
+        presence_penalty: runtime.presence_penalty,
+        max_tokens: runtime.max_tokens,
+        stream: false,
+        response_format: ResponseFormat {
+            kind: "json_object",
+        },
+    };
+    let response = match client.post(&runtime.endpoint).json(&req).send() {
+        Ok(response) => match response.error_for_status() {
+            Ok(response) => response,
+            Err(err) => {
+                return LibrarianResult {
+                    active: true,
+                    warning: Some(format!("request failed: {err}")),
+                    ..Default::default()
+                };
+            }
+        },
+        Err(err) => {
+            return LibrarianResult {
+                active: true,
+                warning: Some(format!("request failed: {err}")),
+                ..Default::default()
+            };
+        }
+    };
+    let parsed: OpenAiChatResponse = match response.json() {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return LibrarianResult {
+                active: true,
+                warning: Some(format!("response parse failed: {err}")),
+                ..Default::default()
+            };
+        }
+    };
+    let content = match parsed.choices.into_iter().next() {
+        Some(choice) => choice.message.content,
+        None => {
+            return LibrarianResult {
+                active: true,
+                warning: Some("empty librarian response".to_string()),
+                ..Default::default()
+            };
+        }
+    };
+    let reply = match parse_librarian_reply(&content) {
+        Ok(reply) => reply,
+        Err(err) => {
+            return LibrarianResult {
+                active: true,
+                warning: Some(err),
+                ..Default::default()
+            };
+        }
+    };
+    match validate_librarian_reply(reply, &chosen, runtime.max_selected) {
+        Ok((selected_ids, brief)) => LibrarianResult {
+            active: true,
+            brief: non_empty(&brief).map(truncate_brief),
+            selected_ids,
+            warning: None,
+        },
+        Err(err) => LibrarianResult {
+            active: true,
+            warning: Some(err),
+            ..Default::default()
+        },
+    }
+}
+
+fn librarian_prompt(
+    project: &str,
+    cwd: &Path,
+    queries: &[String],
+    candidates: &[&Candidate],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("Project: ");
+    prompt.push_str(project);
+    prompt.push_str("\nCwd: ");
+    prompt.push_str(&cwd.display().to_string());
+    prompt.push_str("\nTask queries: ");
+    if queries.is_empty() {
+        prompt.push_str("current state, handoff, risk, next step");
+    } else {
+        prompt.push_str(&queries.join(" | "));
+    }
+    prompt.push_str(
+        "\nMode: /no_think\n\nSelect startup context for coding agent. Use only candidate IDs shown. Select fewer records when unsure. Prefer active handoffs, unresolved blockers, live risks, recent decisions, current next steps, and durable protocol facts. Drop obsolete, repetitive, resolved, wrong-project, or low-signal items. Select global records only when explicitly cross-project and useful now. Return JSON with exactly these keys: selected_ids, session_brief, dropped_ids. selected_ids must be ordered by usefulness. session_brief must use facts from selected IDs only. dropped_ids must contain every non-selected candidate with reason enum: duplicate, stale_superseded, resolved_done, wrong_project, global_not_needed, low_signal, too_old, unknown.\n\nCandidates:\n",
+    );
+    for candidate in candidates {
+        prompt.push_str(&render_candidate_card(candidate));
+        prompt.push('\n');
+    }
+    prompt
+}
+
+fn render_candidate_card(candidate: &Candidate) -> String {
+    let ts = timestamp_seconds(candidate.frame_ts)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "unknown".to_string());
+    let project = candidate.header.get("project").unwrap_or("unknown");
+    let status = candidate.header.get("status").unwrap_or("unknown");
+    let kind = candidate.header.get("type").unwrap_or("unknown");
+    let body = truncate_clean(&strip_markdown_noise(&candidate.body), 600);
+    format!(
+        "id: {}\nproject: {}\ntimestamp: {}\nstatus: {}\ntype: {}\nscore: {:.1}\nbody: {}\n",
+        candidate_id(candidate),
+        project,
+        ts,
+        status,
+        kind,
+        candidate.score,
+        body
+    )
+}
+
+fn parse_librarian_reply(raw: &str) -> std::result::Result<LibrarianReply, String> {
+    let json = extract_json_object(raw)
+        .ok_or_else(|| "no JSON object in librarian response".to_string())?;
+    serde_json::from_str::<LibrarianReply>(&json)
+        .map_err(|err| format!("invalid librarian JSON: {err}"))
+}
+
+fn validate_librarian_reply(
+    reply: LibrarianReply,
+    candidates: &[&Candidate],
+    max_selected: usize,
+) -> std::result::Result<(Vec<String>, String), String> {
+    let allowed_ids: HashSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate_id(candidate))
+        .collect();
+    let mut selected_ids = Vec::new();
+    let mut seen_selected = HashSet::new();
+    for id in reply.selected_ids {
+        if !allowed_ids.contains(&id) {
+            return Err(format!("selected unknown candidate id: {id}"));
+        }
+        if !seen_selected.insert(id.clone()) {
+            return Err(format!("duplicate selected candidate id: {id}"));
+        }
+        selected_ids.push(id);
+    }
+    if selected_ids.is_empty() {
+        return Err("empty selected_ids; using heuristic fallback".to_string());
+    }
+    if selected_ids.len() > max_selected {
+        return Err(format!(
+            "selected {} records, max allowed is {max_selected}",
+            selected_ids.len()
+        ));
+    }
+
+    let selected: HashSet<&str> = selected_ids.iter().map(String::as_str).collect();
+    let mut dropped = HashSet::new();
+    for dropped_record in reply.dropped_ids {
+        let _reason = dropped_record.reason;
+        if !allowed_ids.contains(&dropped_record.id) {
+            return Err(format!(
+                "dropped unknown candidate id: {}",
+                dropped_record.id
+            ));
+        }
+        if selected.contains(dropped_record.id.as_str()) {
+            return Err(format!(
+                "candidate appears in selected_ids and dropped_ids: {}",
+                dropped_record.id
+            ));
+        }
+        if !dropped.insert(dropped_record.id.clone()) {
+            return Err(format!(
+                "duplicate dropped candidate id: {}",
+                dropped_record.id
+            ));
+        }
+    }
+    let missing_drop_count = allowed_ids
+        .iter()
+        .filter(|id| !selected.contains(id.as_str()) && !dropped.contains(*id))
+        .count();
+    if missing_drop_count > 0 {
+        return Err(format!(
+            "dropped_ids omitted {missing_drop_count} non-selected candidates"
+        ));
+    }
+
+    Ok((selected_ids, reply.session_brief))
+}
+
+fn extract_json_object(raw: &str) -> Option<String> {
+    let start = raw.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    for (offset, ch) in raw[start..].char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return raw.get(start..end).map(ToString::to_string);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn apply_librarian_selection(
+    candidates: Vec<Candidate>,
+    selected_ids: &[String],
+) -> Vec<Candidate> {
+    if selected_ids.is_empty() {
+        return candidates;
+    }
+    let mut by_id = BTreeMap::new();
+    for candidate in candidates {
+        let id = candidate_id(&candidate);
+        by_id.insert(id, candidate);
+    }
+    let mut ordered = Vec::new();
+    for id in selected_ids {
+        if let Some(candidate) = by_id.remove(id) {
+            ordered.push(candidate);
+        }
+    }
+    ordered
+}
+
+fn candidate_id(candidate: &Candidate) -> String {
+    let store_name = candidate
+        .store
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown.mv2");
+    format!("{store_name}:{}", candidate.frame_id)
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn truncate_brief(text: String) -> String {
+    truncate_clean(&text, 400)
 }
 
 fn classify_project_match(header: &Header, body: &str, project: &str) -> ProjectMatch {
@@ -608,14 +1109,22 @@ fn render_packet(input: RenderInput<'_>) -> String {
         &mut out,
         input.budget_chars,
         &format!(
-            "# Memvid Startup Context\n\n- agent: `{}`\n- project: `{}`\n- cwd: `{}`\n- generated: `{generated}`\n- store_dir: `{}`\n- stores_searched: `{}`\n- compression_horizon: `7 days`\n\n",
+            "# Memvid Startup Context\n\n- agent: `{}`\n- project: `{}`\n- cwd: `{}`\n- generated: `{generated}`\n- store_dir: `{}`\n- stores_searched: `{}`\n- compression_horizon: `7 days`\n- librarian: `{}`\n\n",
             input.args.agent,
             input.project,
             input.cwd.display(),
             input.store_dir.display(),
-            input.stores_searched
+            input.stores_searched,
+            if input.librarian.active { "enabled" } else { "disabled" }
         ),
     );
+    if let Some(brief) = input.librarian.brief.as_ref() {
+        push_block(
+            &mut out,
+            input.budget_chars,
+            &format!("## Librarian Brief\n\n{}\n\n", brief),
+        );
+    }
     push_block(
         &mut out,
         input.budget_chars,
@@ -971,5 +1480,105 @@ mod tests {
         let older = candidate(RECENCY_CLIFF_HOURS + 0.1, 80.0);
         assert_eq!(classify(&fresh), Section::Fresh);
         assert_ne!(classify(&older), Section::Fresh);
+    }
+
+    #[test]
+    fn parse_librarian_reply_accepts_embedded_json() {
+        let raw = "preface {\"selected_ids\":[\"memvid.mv2:42\"],\"session_brief\":\"Current task\",\"dropped_ids\":[{\"id\":\"memvid.mv2:41\",\"reason\":\"duplicate\"}]} suffix";
+        let parsed = parse_librarian_reply(raw).unwrap();
+        assert_eq!(parsed.selected_ids, vec!["memvid.mv2:42"]);
+        assert_eq!(parsed.session_brief, "Current task");
+        assert_eq!(parsed.dropped_ids[0].reason, DropReason::Duplicate);
+    }
+
+    #[test]
+    fn apply_librarian_selection_keeps_only_selected_records() {
+        let mut first = candidate(1.0, 90.0);
+        first.frame_id = 10;
+        let mut second = candidate(2.0, 80.0);
+        second.frame_id = 20;
+        let selected =
+            apply_librarian_selection(vec![first, second], &["memvid.mv2:20".to_string()]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].frame_id, 20);
+    }
+
+    #[test]
+    fn librarian_runtime_enables_from_config_without_flag() {
+        let args = Args::parse_from(["memvid-context"]);
+        let configured = Librarian {
+            enabled: true,
+            endpoint: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+            model: "qwen3:8b".to_string(),
+            timeout_ms: 20_000,
+            max_candidates: 12,
+            max_selected: 6,
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 1.0,
+            presence_penalty: 1.5,
+        };
+        let runtime = librarian_runtime(&args, Some(&configured)).unwrap();
+        assert_eq!(runtime.model, "qwen3:8b");
+        assert_eq!(runtime.timeout_ms, 20_000);
+        assert_eq!(runtime.max_candidates, 12);
+        assert_eq!(runtime.max_selected, 6);
+    }
+
+    #[test]
+    fn no_librarian_overrides_enabled_config() {
+        let args = Args::parse_from(["memvid-context", "--no-librarian"]);
+        let configured = Librarian {
+            enabled: true,
+            endpoint: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+            model: "qwen3:8b".to_string(),
+            timeout_ms: 20_000,
+            max_candidates: 12,
+            max_selected: 6,
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 1.0,
+            presence_penalty: 1.5,
+        };
+        assert!(librarian_runtime(&args, Some(&configured)).is_none());
+    }
+
+    #[test]
+    fn validate_librarian_reply_rejects_over_selection() {
+        let first = candidate(1.0, 90.0);
+        let mut second = candidate(2.0, 80.0);
+        second.frame_id = 2;
+        let reply = LibrarianReply {
+            selected_ids: vec!["memvid.mv2:1".to_string(), "memvid.mv2:2".to_string()],
+            session_brief: "too many".to_string(),
+            dropped_ids: Vec::new(),
+        };
+        let err = validate_librarian_reply(reply, &[&first, &second], 1).unwrap_err();
+        assert!(err.contains("max allowed"));
+    }
+
+    #[test]
+    fn single_candidate_librarian_path_skips_model() {
+        let runtime = LibrarianRuntime {
+            endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+            model: "qwen3:8b".to_string(),
+            timeout_ms: 1,
+            max_candidates: 12,
+            max_selected: 6,
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 1.0,
+            presence_penalty: 1.5,
+        };
+        let item = candidate(1.0, 90.0);
+        let result = rerank_with_librarian(
+            &runtime,
+            "memvid",
+            Path::new("/home/foobis/memvid"),
+            &[],
+            &[item],
+        );
+        assert_eq!(result.selected_ids, vec!["memvid.mv2:1"]);
+        assert!(result.warning.is_none());
     }
 }

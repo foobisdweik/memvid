@@ -320,6 +320,18 @@ max_length = 512
 
 [ingestion]
 commit_interval = 32
+
+[librarian]
+enabled = true
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "qwen3:8b"
+timeout_ms = 20000
+max_candidates = 12
+max_selected = 6
+max_tokens = 512
+temperature = 0.0
+top_p = 1.0
+presence_penalty = 1.5
 EOF
   chmod 0644 "$settings"
 }

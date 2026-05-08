@@ -7,6 +7,8 @@
 ```bash
 memvid-context --project memvid --agent codex --budget-tokens 4000
 memvid-context --project memvid --query "open risks service install"
+memvid-context --project memvid --librarian --query "active bug next step"
+memvid-context --project memvid --no-librarian --query "active bug next step"
 memvid-queue-write --agent codex --project memvid --status done --type update <<'EOF'
 Completed shard-routing fix and verified tests.
 EOF
@@ -40,3 +42,29 @@ Queue ingestion writes stable shards under `/var/lib/memvid/store`:
 The injector opens stores read-only and falls back to a temporary snapshot copy if the live writer lock blocks direct reads. Startup context should be selected from the active project shard plus explicit global records. Other project shards are hidden unless `--include-other-projects` is set for debugging or migration.
 
 Agents should treat injected context as read-only and write durable updates only through `/var/lib/memvid/queue`. Use `[project:global]` only for explicit cross-project coordination; normal workspace notes belong in the current project shard.
+
+## Librarian Mode
+
+`memvid-context` can call local OpenAI-compatible endpoint such as Ollama at `http://127.0.0.1:11434/v1/chat/completions`.
+
+- Repo config enables librarian by default. `--librarian` is explicit override for ad hoc runs; `--no-librarian` forces heuristic baseline.
+- Heuristics still build bounded candidate pool first.
+- Librarian sees only active project shard plus explicit global records.
+- Valid librarian JSON can narrow final packet to selected record IDs and add short session brief.
+- Timeouts, HTTP errors, malformed JSON, invalid IDs, over-selection, or empty selections fall back to heuristic recall.
+
+Default local Qwen3/Ollama profile:
+
+```toml
+[librarian]
+enabled = true
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "qwen3:8b"
+timeout_ms = 20000
+max_candidates = 12
+max_selected = 6
+max_tokens = 512
+temperature = 0.0
+top_p = 1.0
+presence_penalty = 1.5
+```

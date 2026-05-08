@@ -141,7 +141,7 @@ Gebruik Memvid in je lievelingstaal:
 
 ### Benodigdheden
 
--   **Rust 1.85.0+** — Installeer vanuit [rustup.rs](https://rustup.rs)
+-   **Rust 1.85.0+** — Voor `memvid-core`; repo-ontwikkeling gebruikt Rust 1.90.0 uit `rust-toolchain.toml`. Installeer via [rustup.rs](https://rustup.rs)
 
 ### Voeg dit aan je project toe
 

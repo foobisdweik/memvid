@@ -141,7 +141,7 @@ Memvidは、AIエージェントに永続的な記憶と高速な呼び出し機
 
 ### 要件
 
-- **Rust 1.85.0+** - [rustup.rs](https://rustup.rs) からインストールしてください。
+- **Rust 1.85.0+** - `memvid-core` 用です。リポジトリ開発は `rust-toolchain.toml` の Rust 1.90.0 を使います。[rustup.rs](https://rustup.rs) からインストールしてください。
 
 ### プロジェクトへの追加
 

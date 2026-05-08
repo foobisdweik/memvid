@@ -39,7 +39,7 @@ Startup recall uses a 7-day chrono-semantic horizon:
 - 4-7 days: canonical facts, risks, handoffs, and invariants.
 - 7+ days: one-line facts or omission unless semantically critical.
 
-Raw `.mv2` stores are never rewritten by compression. The packet is only a view over backend-owned project shards.
+Raw `.mv2` stores are never rewritten by compression. The packet is only a view over backend-owned stable project shards.
 
 ## Store Layout
 
@@ -57,7 +57,7 @@ Agents should treat injected context as read-only and write durable updates only
 
 `memvid-context` can call local OpenAI-compatible endpoint such as Ollama at `http://127.0.0.1:11434/v1/chat/completions`.
 
-- Repo config enables librarian by default. `--librarian` is explicit override for ad hoc runs; `--no-librarian` forces heuristic baseline.
+- Repo config enables librarian. `--librarian` is explicit override for ad hoc runs; `--no-librarian` forces heuristic baseline. If model call fails, startup falls back to heuristic recall.
 - Heuristics still build bounded candidate pool first.
 - Librarian sees only active project shard plus explicit global records.
 - Valid librarian JSON can narrow final packet to selected record IDs and add short session brief.

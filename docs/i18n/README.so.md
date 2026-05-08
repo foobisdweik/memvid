@@ -139,7 +139,7 @@ Ku isticmaal Memvid luuqadda aad doorbidi lahayd:
 
 ### Shuruudaha
 
--   **Rust 1.85.0+** — Si aad ugu shubato Guji linkagan [rustup.rs](https://rustup.rs)
+-   **Rust 1.85.0+** — `memvid-core` ahaan; repo development waxay isticmaashaa Rust 1.90.0 ee `rust-toolchain.toml`. Ka soo deji [rustup.rs](https://rustup.rs)
 
 ### Ku dar Mashruucaaga
 

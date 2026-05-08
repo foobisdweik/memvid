@@ -113,7 +113,7 @@ Common options:
   --dry-run
   --no-deps
   --no-services
-  --no-aliases
+  --no-aliases            Do not update root/user shell functions and wrappers.
   --user USER
   --cachyos-nvidia installed|all|skip
   --nvidia-flavor open|closed|auto

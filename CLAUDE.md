@@ -1,11 +1,11 @@
 # Claude Instructions
 
-Follow `AGENTS.md`. Claude-specific durable memory is disabled for project facts, architecture, conventions, and handoffs. Write those records to `/var/lib/memvid/queue/` with the atomic queue protocol.
+Follow `AGENTS.md`. Claude-specific durable memory is disabled for project facts, architecture, conventions, and handoffs. Write those records as atomic queue Markdown to `/var/lib/memvid/queue/`.
 
-Start sessions through a Memvid context wrapper when available. Treat injected Memvid startup context as read-only recall and do not access `.mv2` stores directly.
+Start sessions through installed `claude-memvid` wrapper or shell function when available. It loads `memvid-context` and librarian automatically at CLI startup. Treat injected startup context as read-only recall and do not access `.mv2` stores directly.
 
 Use `agent:claude` in queued headers.
-Use `[project:global]` only for explicit cross-project coordination. Ordinary workspace facts belong to the current project shard.
+Use `[project:global]` only for explicit cross-project coordination. Ordinary workspace facts belong to current project shard.
 
 ## Memvid Queue — Mandatory Checkpoints
 

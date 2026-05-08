@@ -24,7 +24,7 @@ The bundle contains:
 - Nomic ONNX model and tokenizer
 - ONNX Runtime provider libraries
 - rebuildable source snapshot installed to `/opt/memvid/source`
-- installer logic for settings, state dirs, systemd units, and Bash aliases
+- installer logic for settings, state dirs, systemd units, and shell functions
 
 The `.run` file is intentionally uncompressed. It is the fast local installer.
 
@@ -67,6 +67,8 @@ sudo ./dist/memvid-bootstrap-x86_64-linux.run --dry-run
 ```
 
 Useful options:
+
+Default model dir is `/opt/models/nomic-embed-text-v1`; `--model-dir` overrides it for alternate local runtimes.
 
 ```bash
 --no-deps

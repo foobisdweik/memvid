@@ -175,7 +175,7 @@
 
 ### আবশ্যকতা
 
--   **Rust 1.85.0+** — Install from [rustup.rs](https://rustup.rs)
+-   **Rust 1.85.0+** — `memvid-core` এর জন্য. Repo development uses Rust 1.90.0 pinned in `rust-toolchain.toml`. Install from [rustup.rs](https://rustup.rs)
 
 ### আপনার প্রকল্পে যোগ করুন
 

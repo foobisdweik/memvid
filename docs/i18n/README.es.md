@@ -153,7 +153,7 @@ Usa Memvid en tu lenguaje preferido:
 
 ### Requisitos
 
--   **Rust 1.85.0+** — Instálalo desde [rustup.rs](https://rustup.rs)
+-   **Rust 1.85.0+** — Para `memvid-core`. El desarrollo del repo usa Rust 1.90.0 fijado en `rust-toolchain.toml`. Instálalo desde [rustup.rs](https://rustup.rs)
 
 ### Añadir a tu proyecto
 

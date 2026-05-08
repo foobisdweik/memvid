@@ -33,7 +33,7 @@ Options:
   --dry-run              Print actions without changing the system.
   --no-deps              Do not attempt package-manager dependency installation.
   --no-services          Do not install/enable/start systemd services.
-  --no-aliases           Do not update root/user shell integration.
+  --no-aliases           Do not update root/user shell functions and wrappers.
   --user USER            Service/data owner user. Defaults to omen when present.
   --prefix PATH          Install prefix for binaries/libs/share. Default: /usr/local.
   --config-dir PATH      Config directory. Default: /etc/memvid.
@@ -443,14 +443,13 @@ append_shell_block() {
   tmp="$(mktemp)"
   if [[ -f "$rc" ]]; then
     sed \
-      -e '/^# Memvid startup context injection\./,/^alias memq=.*/d' \
       -e '/^# Memvid startup context injection\./,/^# End Memvid startup context injection\./d' \
       "$rc" > "$tmp"
   fi
   cat >> "$tmp" <<EOF
 
 # Memvid startup context injection.
-# Default agent launches go through wrappers that prepend read-only source-of-truth context.
+# Default agent launches go through hardened shell functions that call absolute wrappers and prepend read-only startup context.
 case ":\$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) export PATH="$PREFIX/bin:\$PATH" ;;

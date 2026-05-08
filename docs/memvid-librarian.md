@@ -7,6 +7,7 @@ Memvid librarian is config-enabled local LLM layer for startup recall selection.
 - `memvid-context` owns deterministic safety gates: stable active project shard, explicit `global.mv2`, age limits, byte limits, and fallback behavior.
 - Librarian owns judgment inside that bounded pool: redundancy removal, stale-record rejection, relevance ranking, and session brief synthesis.
 - Agents receive final Markdown context only. They do not query the librarian or `.mv2` stores directly.
+- Agents may write typed recall-steering notes to `/var/lib/memvid/librarian_queue`; `memvid-context` treats those notes as routing hints, not memory facts.
 
 ## Candidate Contract
 
@@ -36,6 +37,29 @@ Output must be machine-checkable:
 
 `memvid-context` rejects malformed output, unknown IDs, duplicate IDs, missing drop reasons, over-selection, and empty selections. Rejection falls back to heuristic recall, so startup still ships a usable packet.
 
+## Librarian Request Queue
+
+Use `memvid-librarian-note` for agent-to-librarian requests:
+
+```bash
+memvid-librarian-note --agent codex --project memvid --intent recall_question <<'EOF'
+Which current handoff records mention wrapper diagnostics?
+EOF
+```
+
+Request records use Markdown headers:
+
+```text
+[agent:<agent>]
+[project:<project|global>]
+[intent:<recall_question|recall_focus|memory_correction>]
+[timestamp:<unix-nanos>]
+
+<specific request body>
+```
+
+`memvid-context` reads recent project/global request records, ignores malformed or oversized records, and includes the rest in the librarian prompt. Request bodies never become durable facts; the session brief must still use selected candidate IDs only.
+
 ## Runtime Boundary
 
 Model choice is external research. Framework requirements:
@@ -46,7 +70,7 @@ Model choice is external research. Framework requirements:
 - returns JSON within startup latency budget
 - never receives unrelated project shards or implicit cross-project data
 
-Default Ollama profile for `qwen3:8b` uses 12 candidates, max 6 selected records, 20s timeout, 512 output tokens, `temperature = 0.0`, `top_p = 1.0`, `presence_penalty = 1.5`, and `/no_think` in the user prompt.
+Default Ollama profile for `qwen3:8b` uses 12 candidates, max 6 selected records, 20s timeout, 512 output tokens, `temperature = 0.0`, `top_p = 1.0`, `presence_penalty = 1.5`, `keep_alive = "-1"`, and `/no_think` in the user prompt. Run `bash scripts/memvid-librarian-cold.sh` to unload the model for the current machine session; next normal agent startup wakes it again.
 
 ## Admin Workflow
 

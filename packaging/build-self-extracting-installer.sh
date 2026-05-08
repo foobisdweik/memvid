@@ -44,7 +44,7 @@ for bin in memvid-context memvid-embedder memvid-ingestor memvid-migrator; do
   install -m 0755 "$ROOT/target/release/$bin" "$PAYLOAD/bin/$bin"
 done
 
-for wrapper in memvid-context-wrap codex-memvid claude-memvid gemini-memvid memvid-queue-write; do
+for wrapper in memvid-context-wrap codex-memvid claude-memvid gemini-memvid memvid-queue-write memvid-librarian-note; do
   need_file "$ROOT/deploy/bin/$wrapper"
   install -m 0755 "$ROOT/deploy/bin/$wrapper" "$PAYLOAD/bin/$wrapper"
 done

@@ -79,6 +79,7 @@ Agents should treat injected context as read-only and write durable updates only
 - Repo config enables librarian. `--librarian` is explicit override for ad hoc runs; `--no-librarian` forces heuristic baseline. If model call fails, startup falls back to heuristic recall.
 - Heuristics still build bounded candidate pool first.
 - Librarian sees only active project shard plus explicit global records.
+- Recent typed notes in `/var/lib/memvid/librarian_queue` can steer recall selection. They are routing hints only, not durable facts.
 - Valid librarian JSON can narrow final packet to selected record IDs and add short session brief.
 - Timeouts, HTTP errors, malformed JSON, invalid IDs, over-selection, or empty selections fall back to heuristic recall.
 - Packet header reports compact librarian diagnostics: status `enabled`, `disabled`, or `fallback`; candidate count; selected count; elapsed milliseconds; and `librarian_warning` when fallback occurs. `--include-store-errors` still controls detailed store warning blocks, but librarian fallback warning stays visible in header diagnostics.
@@ -97,4 +98,15 @@ max_tokens = 512
 temperature = 0.0
 top_p = 1.0
 presence_penalty = 1.5
+keep_alive = "-1"
 ```
+
+Write recall-steering notes with `memvid-librarian-note`:
+
+```bash
+memvid-librarian-note --agent codex --project memvid --intent recall_focus <<'EOF'
+Prioritize current wrapper diagnostics and unresolved installer dry-run risk.
+EOF
+```
+
+Supported intents are `recall_question`, `recall_focus`, and `memory_correction`. To unload the warm librarian model without changing config, run `bash scripts/memvid-librarian-cold.sh`; next normal agent startup loads it again.

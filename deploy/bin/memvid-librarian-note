@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  memvid-librarian-note --agent NAME --project PROJECT --intent INTENT
+
+Reads a concrete librarian request from stdin and atomically writes it to the
+configured Memvid librarian queue.
+
+Supported intents:
+  recall_question
+  recall_focus
+  memory_correction
+EOF
+}
+
+settings_path="${MEMVID_CONFIG:-/etc/memvid/settings.toml}"
+queue_dir="${MEMVID_LIBRARIAN_QUEUE_DIR:-}"
+agent="${MEMVID_AGENT:-agent}"
+project=""
+intent=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent)
+      agent="${2:?--agent requires a value}"
+      shift 2
+      ;;
+    --project)
+      project="${2:?--project requires a value}"
+      shift 2
+      ;;
+    --intent)
+      intent="${2:?--intent requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$intent" in
+  recall_question|recall_focus|memory_correction) ;;
+  "")
+    echo "--intent is required" >&2
+    exit 1
+    ;;
+  *)
+    echo "Unsupported intent: $intent" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "$queue_dir" ]]; then
+  if [[ ! -f "$settings_path" ]]; then
+    echo "Memvid settings not found: $settings_path" >&2
+    exit 1
+  fi
+  queue_dir="$(
+    awk -F'=' '
+      $1 ~ /^[[:space:]]*librarian_queue[[:space:]]*$/ {
+        gsub(/"/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        print $2
+        exit
+      }
+    ' "$settings_path"
+  )"
+fi
+
+if [[ -z "$queue_dir" ]]; then
+  queue_dir="/var/lib/memvid/librarian_queue"
+fi
+
+if [[ -z "$project" ]]; then
+  echo "--project is required" >&2
+  exit 1
+fi
+
+body="$(cat)"
+if [[ -z "${body//[[:space:]]/}" ]]; then
+  echo "request body is required on stdin" >&2
+  exit 1
+fi
+if (( ${#body} > 8192 )); then
+  echo "request body exceeds 8192 bytes" >&2
+  exit 1
+fi
+
+timestamp="$(date +%s%N)"
+if command -v uuidgen >/dev/null 2>&1; then
+  uuid="$(uuidgen)"
+elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+  uuid="$(cat /proc/sys/kernel/random/uuid)"
+else
+  uuid="$(openssl rand -hex 16)"
+fi
+
+mkdir -p "$queue_dir"
+tmp_path="$queue_dir/.tmp.$uuid"
+final_path="$queue_dir/$uuid.md"
+
+{
+  printf '[agent:%s]\n' "$agent"
+  printf '[project:%s]\n' "$project"
+  printf '[intent:%s]\n' "$intent"
+  printf '[timestamp:%s]\n\n' "$timestamp"
+  printf '%s\n' "$body"
+} > "$tmp_path"
+
+chmod 0644 "$tmp_path"
+mv "$tmp_path" "$final_path"

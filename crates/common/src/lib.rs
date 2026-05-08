@@ -17,6 +17,8 @@ pub struct Settings {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Paths {
     pub queue: String,
+    #[serde(default = "default_librarian_queue")]
+    pub librarian_queue: String,
     pub processing: String,
     pub ingest: String,
     pub done: String,
@@ -57,6 +59,12 @@ pub struct Librarian {
     pub top_p: f32,
     #[serde(default = "default_librarian_presence_penalty")]
     pub presence_penalty: f32,
+    #[serde(default)]
+    pub keep_alive: Option<String>,
+}
+
+fn default_librarian_queue() -> String {
+    "/var/lib/memvid/librarian_queue".to_string()
 }
 
 fn default_librarian_timeout_ms() -> u64 {
@@ -144,6 +152,7 @@ pub fn move_to_failed(job: &Job, failed_dir: &str) -> Result<Job> {
 
 pub fn ensure_directories(settings: &Settings) -> Result<()> {
     fs::create_dir_all(&settings.paths.queue)?;
+    fs::create_dir_all(&settings.paths.librarian_queue)?;
     fs::create_dir_all(&settings.paths.processing)?;
     fs::create_dir_all(&settings.paths.ingest)?;
     fs::create_dir_all(&settings.paths.done)?;
@@ -155,4 +164,67 @@ pub fn ensure_directories(settings: &Settings) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_settings(extra_paths: &str, extra_librarian: &str) -> String {
+        format!(
+            r#"
+[paths]
+queue = "/tmp/memvid/queue"
+processing = "/tmp/memvid/processing"
+ingest = "/tmp/memvid/ingest"
+done = "/tmp/memvid/done"
+failed = "/tmp/memvid/failed"
+store = "/tmp/memvid/store"
+{extra_paths}
+
+[embedding]
+model_path = "/opt/models/model.onnx"
+tokenizer_path = "/opt/models/tokenizer.json"
+batch_size = 32
+max_length = 512
+
+[ingestion]
+commit_interval = 32
+
+[librarian]
+enabled = true
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "qwen3:8b"
+{extra_librarian}
+"#
+        )
+    }
+
+    #[test]
+    fn settings_default_librarian_queue_when_missing() {
+        let settings: Settings = toml::from_str(&minimal_settings("", "")).unwrap();
+
+        assert_eq!(
+            settings.paths.librarian_queue,
+            "/var/lib/memvid/librarian_queue"
+        );
+    }
+
+    #[test]
+    fn settings_parse_librarian_queue_and_keep_alive() {
+        let settings: Settings = toml::from_str(&minimal_settings(
+            r#"librarian_queue = "/tmp/memvid/librarian_queue""#,
+            r#"keep_alive = "-1""#,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            settings.paths.librarian_queue,
+            "/tmp/memvid/librarian_queue"
+        );
+        assert_eq!(
+            settings.librarian.unwrap().keep_alive.as_deref(),
+            Some("-1")
+        );
+    }
 }

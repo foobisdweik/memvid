@@ -306,6 +306,7 @@ write_settings() {
   cat > "$settings" <<EOF
 [paths]
 queue = "$STATE_DIR/queue"
+librarian_queue = "$STATE_DIR/librarian_queue"
 processing = "$STATE_DIR/processing"
 ingest = "$STATE_DIR/ingest"
 done = "$STATE_DIR/done"
@@ -332,6 +333,7 @@ max_tokens = 512
 temperature = 0.0
 top_p = 1.0
 presence_penalty = 1.5
+keep_alive = "-1"
 EOF
   chmod 0644 "$settings"
 }
@@ -363,7 +365,7 @@ create_state_dirs() {
     RUN_GROUP=root
     INSTALL_SERVICES=0
   fi
-  for dir in queue processing ingest done failed store legacy_archives; do
+  for dir in queue librarian_queue processing ingest done failed store legacy_archives; do
     run install -d -o "$owner" -g "$RUN_GROUP" -m 0755 "$STATE_DIR/$dir"
   done
 }
@@ -463,6 +465,7 @@ claude-raw() { command claude "\$@"; }
 gemini-raw() { command gemini "\$@"; }
 memctx() { command "$PREFIX/bin/memvid-context" "\$@"; }
 memq() { command "$PREFIX/bin/memvid-queue-write" "\$@"; }
+memlib() { command "$PREFIX/bin/memvid-librarian-note" "\$@"; }
 # End Memvid startup context injection.
 EOF
   install -m 0644 "$tmp" "$rc"
@@ -495,6 +498,7 @@ verify_install() {
     "$PREFIX/bin/claude-memvid"
     "$PREFIX/bin/gemini-memvid"
     "$PREFIX/bin/memvid-queue-write"
+    "$PREFIX/bin/memvid-librarian-note"
     "$CONFIG_DIR/settings.toml"
     "$MODEL_DIR/model.onnx"
     "$MODEL_DIR/tokenizer.json"

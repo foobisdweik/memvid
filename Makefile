@@ -97,6 +97,7 @@ test-unit: ## Run unit tests only
 test-wrappers: ## Run shell tests for CLI launch wrappers
 	@echo "$(CYAN)Running wrapper launch tests...$(NC)"
 	@bash tests/wrappers/test_cli_launch_wrappers.sh
+	@bash tests/wrappers/test_librarian_tools.sh
 
 fmt: ## Format code
 	@echo "$(CYAN)Formatting code...$(NC)"

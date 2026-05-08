@@ -21,6 +21,9 @@ const MAX_BODY_READ_BYTES: usize = 256 * 1024;
 const RECENCY_CLIFF_HOURS: f64 = 16.0;
 const RECENT_DETAIL_HOURS: f64 = 4.0;
 const MAX_OLDER_RECORDS: usize = 12;
+const MAX_LIBRARIAN_REQUESTS: usize = 8;
+const MAX_LIBRARIAN_REQUEST_BYTES: u64 = 16 * 1024;
+const LIBRARIAN_REQUEST_HORIZON_HOURS: i64 = 168;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -146,6 +149,17 @@ struct LibrarianRuntime {
     temperature: f32,
     top_p: f32,
     presence_penalty: f32,
+    keep_alive: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LibrarianRequest {
+    id: String,
+    agent: String,
+    project: String,
+    intent: String,
+    timestamp: DateTime<Utc>,
+    body: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -205,6 +219,7 @@ fn main() -> Result<()> {
         .store
         .clone()
         .unwrap_or_else(|| PathBuf::from(settings.paths.store));
+    let librarian_queue = PathBuf::from(settings.paths.librarian_queue.clone());
     let budget_chars = args.budget_tokens.saturating_mul(TOKEN_TO_CHAR_RATIO);
 
     let stores = discover_stores(&store_dir, args.max_store_days)?;
@@ -222,10 +237,18 @@ fn main() -> Result<()> {
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     candidates = trim_candidates_for_budget(candidates, args.max_records);
     let candidate_count = candidates.len();
+    let librarian_requests = collect_librarian_requests(&librarian_queue, &project);
     let librarian = librarian_runtime(&args, settings.librarian.as_ref());
     let mut librarian_result = if let Some(runtime) = librarian.as_ref() {
         let started = Instant::now();
-        let mut result = rerank_with_librarian(runtime, &project, &cwd, &args.queries, &candidates);
+        let mut result = rerank_with_librarian(
+            runtime,
+            &project,
+            &cwd,
+            &args.queries,
+            &librarian_requests,
+            &candidates,
+        );
         result.elapsed_ms = millis_u64(started.elapsed());
         result
     } else {
@@ -275,6 +298,8 @@ struct OpenAiChatRequest<'a> {
     presence_penalty: f32,
     max_tokens: usize,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<&'a str>,
     response_format: ResponseFormat,
 }
 
@@ -429,6 +454,94 @@ fn is_project_visible(project_match: ProjectMatch) -> bool {
     )
 }
 
+fn collect_librarian_requests(queue_dir: &Path, project: &str) -> Vec<LibrarianRequest> {
+    let Ok(entries) = fs::read_dir(queue_dir) else {
+        return Vec::new();
+    };
+    let cutoff = Utc::now() - chrono::Duration::hours(LIBRARIAN_REQUEST_HORIZON_HOURS);
+    let mut requests = Vec::new();
+
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tmp."))
+        {
+            continue;
+        }
+        if entry
+            .metadata()
+            .map(|meta| meta.len() > MAX_LIBRARIAN_REQUEST_BYTES)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(request) = parse_librarian_request(&path, &text, project) else {
+            continue;
+        };
+        if request.timestamp < cutoff {
+            continue;
+        }
+        requests.push(request);
+    }
+
+    requests.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
+    requests.truncate(MAX_LIBRARIAN_REQUESTS);
+    requests
+}
+
+fn parse_librarian_request(
+    path: &Path,
+    text: &str,
+    current_project: &str,
+) -> Option<LibrarianRequest> {
+    let (header, body) = parse_header(text);
+    let project = header.get("project")?.trim();
+    if normalized_project_key(project) != normalized_project_key(current_project)
+        && !project.eq_ignore_ascii_case("global")
+    {
+        return None;
+    }
+    let intent = header.get("intent")?.trim();
+    if !matches!(
+        intent,
+        "recall_question" | "recall_focus" | "memory_correction"
+    ) {
+        return None;
+    }
+    let body = normalize_ws(&body);
+    if body.is_empty() {
+        return None;
+    }
+    let timestamp = header.get("timestamp").and_then(parse_timestamp)?;
+    let id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown.md")
+        .to_string();
+    Some(LibrarianRequest {
+        id,
+        agent: header.get("agent").unwrap_or("agent").to_string(),
+        project: project.to_string(),
+        intent: intent.to_string(),
+        timestamp,
+        body: truncate_clean(&body, 800),
+    })
+}
+
 fn librarian_runtime(args: &Args, configured: Option<&Librarian>) -> Option<LibrarianRuntime> {
     let enabled =
         !args.no_librarian && (args.librarian || configured.is_some_and(|cfg| cfg.enabled));
@@ -464,6 +577,7 @@ fn librarian_runtime(args: &Args, configured: Option<&Librarian>) -> Option<Libr
     let temperature = configured.map(|cfg| cfg.temperature).unwrap_or(0.0);
     let top_p = configured.map(|cfg| cfg.top_p).unwrap_or(1.0);
     let presence_penalty = configured.map(|cfg| cfg.presence_penalty).unwrap_or(1.5);
+    let keep_alive = configured.and_then(|cfg| cfg.keep_alive.clone());
 
     Some(LibrarianRuntime {
         endpoint,
@@ -475,6 +589,7 @@ fn librarian_runtime(args: &Args, configured: Option<&Librarian>) -> Option<Libr
         temperature,
         top_p,
         presence_penalty,
+        keep_alive,
     })
 }
 
@@ -483,6 +598,7 @@ fn rerank_with_librarian(
     project: &str,
     cwd: &Path,
     queries: &[String],
+    requests: &[LibrarianRequest],
     candidates: &[Candidate],
 ) -> LibrarianResult {
     if candidates.is_empty() {
@@ -501,7 +617,7 @@ fn rerank_with_librarian(
     }
 
     let chosen: Vec<&Candidate> = candidates.iter().take(runtime.max_candidates).collect();
-    let prompt = librarian_prompt(project, cwd, queries, &chosen);
+    let prompt = librarian_prompt(project, cwd, queries, requests, &chosen);
     let client = match Client::builder()
         .timeout(Duration::from_millis(runtime.timeout_ms))
         .build()
@@ -532,6 +648,7 @@ fn rerank_with_librarian(
         presence_penalty: runtime.presence_penalty,
         max_tokens: runtime.max_tokens,
         stream: false,
+        keep_alive: runtime.keep_alive.as_deref(),
         response_format: ResponseFormat {
             kind: "json_object",
         },
@@ -609,6 +726,7 @@ fn librarian_prompt(
     project: &str,
     cwd: &Path,
     queries: &[String],
+    requests: &[LibrarianRequest],
     candidates: &[&Candidate],
 ) -> String {
     let mut prompt = String::new();
@@ -623,13 +741,32 @@ fn librarian_prompt(
         prompt.push_str(&queries.join(" | "));
     }
     prompt.push_str(
-        "\nMode: /no_think\n\nSelect startup context for coding agent. Use only candidate IDs shown. Select fewer records when unsure. Prefer active handoffs, unresolved blockers, live risks, recent decisions, current next steps, and durable protocol facts. Drop obsolete, repetitive, resolved, wrong-project, or low-signal items. Select global records only when explicitly cross-project and useful now. Return JSON with exactly these keys: selected_ids, session_brief, dropped_ids. selected_ids must be ordered by usefulness. session_brief must use facts from selected IDs only. dropped_ids must contain every non-selected candidate with reason enum: duplicate, stale_superseded, resolved_done, wrong_project, global_not_needed, low_signal, too_old, unknown.\n\nCandidates:\n",
+        "\nMode: /no_think\n\nSelect startup context for coding agent. Use only candidate IDs shown. Select fewer records when unsure. Prefer active handoffs, unresolved blockers, live risks, recent decisions, current next steps, and durable protocol facts. Drop obsolete, repetitive, resolved, wrong-project, or low-signal items. Select global records only when explicitly cross-project and useful now. Librarian requests are routing hints only, not facts. Return JSON with exactly these keys: selected_ids, session_brief, dropped_ids. selected_ids must be ordered by usefulness. session_brief must use facts from selected IDs only. dropped_ids must contain every non-selected candidate with reason enum: duplicate, stale_superseded, resolved_done, wrong_project, global_not_needed, low_signal, too_old, unknown.\n\n",
     );
+    if !requests.is_empty() {
+        prompt.push_str("Librarian requests:\n");
+        for request in requests {
+            prompt.push_str(&render_librarian_request_card(request));
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+    prompt.push_str("Candidates:\n");
     for candidate in candidates {
         prompt.push_str(&render_candidate_card(candidate));
         prompt.push('\n');
     }
     prompt
+}
+
+fn render_librarian_request_card(request: &LibrarianRequest) -> String {
+    let ts = request
+        .timestamp
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    format!(
+        "request_id: {}\nagent: {}\nproject: {}\ntimestamp: {}\nintent: {}\nbody: {}\n",
+        request.id, request.agent, request.project, ts, request.intent, request.body
+    )
 }
 
 fn render_candidate_card(candidate: &Candidate) -> String {
@@ -1536,6 +1673,22 @@ mod tests {
         }
     }
 
+    fn configured_librarian() -> Librarian {
+        Librarian {
+            enabled: true,
+            endpoint: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
+            model: "qwen3:8b".to_string(),
+            timeout_ms: 20_000,
+            max_candidates: 12,
+            max_selected: 6,
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 1.0,
+            presence_penalty: 1.5,
+            keep_alive: Some("-1".to_string()),
+        }
+    }
+
     #[test]
     fn recency_bonus_drops_sharply_after_sixteen_hours() {
         assert!(recency_bonus(2.0) > recency_bonus(12.0));
@@ -1725,40 +1878,19 @@ mod tests {
     #[test]
     fn librarian_runtime_enables_from_config_without_flag() {
         let args = Args::parse_from(["memvid-context"]);
-        let configured = Librarian {
-            enabled: true,
-            endpoint: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
-            model: "qwen3:8b".to_string(),
-            timeout_ms: 20_000,
-            max_candidates: 12,
-            max_selected: 6,
-            max_tokens: 512,
-            temperature: 0.0,
-            top_p: 1.0,
-            presence_penalty: 1.5,
-        };
+        let configured = configured_librarian();
         let runtime = librarian_runtime(&args, Some(&configured)).unwrap();
         assert_eq!(runtime.model, "qwen3:8b");
         assert_eq!(runtime.timeout_ms, 20_000);
         assert_eq!(runtime.max_candidates, 12);
         assert_eq!(runtime.max_selected, 6);
+        assert_eq!(runtime.keep_alive.as_deref(), Some("-1"));
     }
 
     #[test]
     fn no_librarian_overrides_enabled_config() {
         let args = Args::parse_from(["memvid-context", "--no-librarian"]);
-        let configured = Librarian {
-            enabled: true,
-            endpoint: "http://127.0.0.1:11434/v1/chat/completions".to_string(),
-            model: "qwen3:8b".to_string(),
-            timeout_ms: 20_000,
-            max_candidates: 12,
-            max_selected: 6,
-            max_tokens: 512,
-            temperature: 0.0,
-            top_p: 1.0,
-            presence_penalty: 1.5,
-        };
+        let configured = configured_librarian();
         assert!(librarian_runtime(&args, Some(&configured)).is_none());
     }
 
@@ -1788,6 +1920,7 @@ mod tests {
             temperature: 0.0,
             top_p: 1.0,
             presence_penalty: 1.5,
+            keep_alive: Some("-1".to_string()),
         };
         let item = candidate(1.0, 90.0);
         let result = rerank_with_librarian(
@@ -1795,9 +1928,89 @@ mod tests {
             "memvid",
             Path::new("/home/foobis/memvid"),
             &[],
+            &[],
             &[item],
         );
         assert_eq!(result.selected_ids, vec!["memvid.mv2:1"]);
         assert!(result.warning.is_none());
+    }
+
+    #[test]
+    fn librarian_prompt_includes_requests_as_hints() {
+        let request = LibrarianRequest {
+            id: "req.md".to_string(),
+            agent: "codex".to_string(),
+            project: "memvid".to_string(),
+            intent: "recall_focus".to_string(),
+            timestamp: timestamp_seconds(1_778_222_734).unwrap(),
+            body: "Focus on wrapper diagnostics.".to_string(),
+        };
+        let item = candidate(1.0, 90.0);
+
+        let prompt = librarian_prompt(
+            "memvid",
+            Path::new("/home/foobis/memvid"),
+            &[],
+            &[request],
+            &[&item],
+        );
+
+        assert!(prompt.contains("Librarian requests:"));
+        assert!(prompt.contains("Librarian requests are routing hints only, not facts."));
+        assert!(prompt.contains("intent: recall_focus"));
+        assert!(prompt.contains("Focus on wrapper diagnostics."));
+    }
+
+    #[test]
+    fn parse_librarian_request_filters_project_intent_and_body() {
+        let valid = "[agent:codex]\n[project:memvid]\n[intent:recall_question]\n[timestamp:1778222734000000000]\n\nWhat next step matters?\n";
+        let parsed = parse_librarian_request(Path::new("/tmp/req.md"), valid, "memvid").unwrap();
+        assert_eq!(parsed.agent, "codex");
+        assert_eq!(parsed.intent, "recall_question");
+
+        let wrong_project = valid.replace("[project:memvid]", "[project:other]");
+        assert!(
+            parse_librarian_request(Path::new("/tmp/req.md"), &wrong_project, "memvid").is_none()
+        );
+
+        let bad_intent = valid.replace("[intent:recall_question]", "[intent:chat]");
+        assert!(parse_librarian_request(Path::new("/tmp/req.md"), &bad_intent, "memvid").is_none());
+
+        let empty_body = "[agent:codex]\n[project:memvid]\n[intent:recall_question]\n\n";
+        assert!(parse_librarian_request(Path::new("/tmp/req.md"), empty_body, "memvid").is_none());
+
+        let missing_timestamp =
+            "[agent:codex]\n[project:memvid]\n[intent:recall_question]\n\nQuestion?\n";
+        assert!(
+            parse_librarian_request(Path::new("/tmp/req.md"), missing_timestamp, "memvid")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn openai_chat_request_serializes_keep_alive_when_configured() {
+        let req = OpenAiChatRequest {
+            model: "qwen3:8b",
+            messages: Vec::new(),
+            temperature: 0.0,
+            top_p: 1.0,
+            presence_penalty: 1.5,
+            max_tokens: 512,
+            stream: false,
+            keep_alive: Some("-1"),
+            response_format: ResponseFormat {
+                kind: "json_object",
+            },
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"keep_alive\":\"-1\""));
+
+        let req_without = OpenAiChatRequest {
+            keep_alive: None,
+            ..req
+        };
+        let json = serde_json::to_string(&req_without).unwrap();
+        assert!(!json.contains("keep_alive"));
     }
 }

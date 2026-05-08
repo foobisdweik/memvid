@@ -33,7 +33,7 @@ Options:
   --dry-run              Print actions without changing the system.
   --no-deps              Do not attempt package-manager dependency installation.
   --no-services          Do not install/enable/start systemd services.
-  --no-aliases           Do not update root/user Bash aliases.
+  --no-aliases           Do not update root/user shell integration.
   --user USER            Service/data owner user. Defaults to omen when present.
   --prefix PATH          Install prefix for binaries/libs/share. Default: /usr/local.
   --config-dir PATH      Config directory. Default: /etc/memvid.
@@ -429,43 +429,58 @@ EOF
   run systemctl restart memvid-ingestor.service memvid-embedder.service
 }
 
-append_alias_block() {
+append_shell_block() {
   local rc="$1"
   [[ "$INSTALL_ALIASES" -eq 1 ]] || return 0
   [[ -n "$rc" ]] || return 0
-  if [[ -f "$rc" ]] && grep -q "Memvid startup context injection" "$rc"; then
-    return 0
-  fi
-  msg "Adding aliases to $rc"
+  msg "Adding shell integration to $rc"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[dry-run] append aliases to $rc"
+    echo "[dry-run] update shell integration in $rc"
     return 0
   fi
   mkdir -p "$(dirname "$rc")"
-  cat >> "$rc" <<'EOF'
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -f "$rc" ]]; then
+    sed \
+      -e '/^# Memvid startup context injection\./,/^alias memq=.*/d' \
+      -e '/^# Memvid startup context injection\./,/^# End Memvid startup context injection\./d' \
+      "$rc" > "$tmp"
+  fi
+  cat >> "$tmp" <<EOF
 
 # Memvid startup context injection.
 # Default agent launches go through wrappers that prepend read-only source-of-truth context.
-alias codex='codex-memvid'
-alias claude='claude-memvid'
-alias gemini='gemini-memvid'
-alias codex-raw='command codex'
-alias claude-raw='command claude'
-alias gemini-raw='command gemini'
-alias memctx='memvid-context'
-alias memq='memvid-queue-write'
+case ":\$PATH:" in
+  *":$PREFIX/bin:"*) ;;
+  *) export PATH="$PREFIX/bin:\$PATH" ;;
+esac
+export MEMVID_CONFIG="$CONFIG_DIR/settings.toml"
+codex() { command "$PREFIX/bin/codex-memvid" "\$@"; }
+claude() { command "$PREFIX/bin/claude-memvid" "\$@"; }
+gemini() { command "$PREFIX/bin/gemini-memvid" "\$@"; }
+codex-raw() { command codex "\$@"; }
+claude-raw() { command claude "\$@"; }
+gemini-raw() { command gemini "\$@"; }
+memctx() { command "$PREFIX/bin/memvid-context" "\$@"; }
+memq() { command "$PREFIX/bin/memvid-queue-write" "\$@"; }
+# End Memvid startup context injection.
 EOF
+  install -m 0644 "$tmp" "$rc"
+  rm -f "$tmp"
 }
 
 install_aliases() {
   [[ "$INSTALL_ALIASES" -eq 1 ]] || return 0
-  append_alias_block /root/.bashrc
+  append_shell_block /root/.bashrc
+  append_shell_block /root/.zshrc
   if id "$RUN_USER" >/dev/null 2>&1; then
     local home
     home="$(getent passwd "$RUN_USER" | cut -d: -f6)"
     if [[ -n "$home" ]]; then
-      append_alias_block "$home/.bashrc"
-      [[ "$DRY_RUN" -eq 1 ]] || chown "$RUN_USER:$RUN_GROUP" "$home/.bashrc"
+      append_shell_block "$home/.bashrc"
+      append_shell_block "$home/.zshrc"
+      [[ "$DRY_RUN" -eq 1 ]] || chown "$RUN_USER:$RUN_GROUP" "$home/.bashrc" "$home/.zshrc"
     fi
   fi
 }

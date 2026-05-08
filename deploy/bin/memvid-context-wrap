@@ -4,14 +4,30 @@ set -euo pipefail
 agent="${MEMVID_AGENT:-agent}"
 project="${MEMVID_PROJECT:-}"
 budget="${MEMVID_CONTEXT_BUDGET_TOKENS:-4000}"
-tmp="${TMPDIR:-/tmp}/memvid-context-${agent}-$$.md"
+tmp="$(mktemp "${TMPDIR:-/tmp}/memvid-context-${agent}.XXXXXX.md")"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+context_bin="$script_dir/memvid-context"
+if [[ ! -x "$context_bin" ]]; then
+  context_bin="$(command -v memvid-context 2>/dev/null)" || {
+    echo "memvid-context-wrap: unable to find memvid-context" >&2
+    exit 127
+  }
+fi
 
 args=(--agent "$agent" --budget-tokens "$budget")
 if [[ -n "$project" ]]; then
   args+=(--project "$project")
 fi
 
-memvid-context "${args[@]}" > "$tmp"
+if ! "$context_bin" "${args[@]}" > "$tmp"; then
+  cat > "$tmp" <<EOF
+# Memvid Startup Context
+
+- agent: \`$agent\`
+- librarian: \`fallback\`
+- warning: \`memvid-context failed; launching command without recalled memory\`
+EOF
+fi
 chmod 0600 "$tmp"
 export MEMVID_STARTUP_CONTEXT_FILE="$tmp"
 export MEMVID_STARTUP_CONTEXT="$(cat "$tmp")"

@@ -18,6 +18,16 @@ gemini-memvid --model gemini-2.5-pro -- "review the current state"
 memvid-context-wrap -- your-agent-command
 ```
 
+## CLI Launch Integration
+
+Installed shell integration should make normal CLI launches route through Memvid automatically:
+
+- `codex`, `claude`, and `gemini` shell functions call absolute wrapper paths.
+- `codex-raw`, `claude-raw`, and `gemini-raw` bypass wrappers when direct launch is needed.
+- Shell startup prepends the Memvid install prefix to `PATH` and exports `MEMVID_CONFIG`.
+- Wrappers locate sibling `memvid-context` first, then fall back to `PATH`.
+- Wrappers fail open: if startup recall fails, they launch the agent with a small fallback packet instead of blocking the CLI.
+
 ## Compression
 
 Startup recall uses a 7-day chrono-semantic horizon:

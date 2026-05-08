@@ -1,9 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-context="$(MEMVID_AGENT=claude memvid-context --agent claude)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+context_bin="$script_dir/memvid-context"
+if [[ ! -x "$context_bin" ]]; then
+  context_bin="$(command -v memvid-context 2>/dev/null)" || {
+    echo "claude-memvid: unable to find memvid-context" >&2
+    exit 127
+  }
+fi
+
+find_agent() {
+  local name="$1"
+  local candidate resolved wrapper
+  local -a path_dirs
+  local IFS=:
+  wrapper="$(realpath -m "$script_dir/$name-memvid" 2>/dev/null || printf '%s/%s-memvid' "$script_dir" "$name")"
+  read -r -a path_dirs <<< "${PATH:-}"
+  for dir in "${path_dirs[@]}"; do
+    [[ -n "$dir" ]] || dir=.
+    candidate="$dir/$name"
+    [[ -x "$candidate" ]] || continue
+    resolved="$(realpath -m "$candidate" 2>/dev/null || printf '%s' "$candidate")"
+    [[ "$resolved" != "$wrapper" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+agent_bin="${MEMVID_CLAUDE_BIN:-}"
+if [[ -z "$agent_bin" ]]; then
+  agent_bin="$(find_agent claude)" || {
+    echo "claude-memvid: unable to find real claude command in PATH" >&2
+    exit 127
+  }
+fi
+
+context_err="$(mktemp "${TMPDIR:-/tmp}/memvid-context-claude.XXXXXX")"
+if ! context="$(MEMVID_AGENT=claude "$context_bin" --agent claude 2>"$context_err")"; then
+  context="# Memvid Startup Context
+
+- agent: \`claude\`
+- librarian: \`fallback\`
+- warning: \`memvid-context failed; launching agent without recalled memory\`
+
+## memvid-context stderr
+
+\`\`\`text
+$(sed -n '1,20p' "$context_err")
+\`\`\`"
+fi
+rm -f "$context_err"
+
 if [[ "$#" -eq 0 ]]; then
-  exec claude "$context"
+  exec "$agent_bin" "$context"
 fi
 
 claude_args=()
@@ -23,14 +74,14 @@ done
 
 if [[ "$seen_separator" -eq 0 ]]; then
   prompt="$*"
-  exec claude "$context
+  exec "$agent_bin" "$context
 
 User request:
 $prompt"
 fi
 
 prompt="${prompt_parts[*]}"
-exec claude "${claude_args[@]}" "$context
+exec "$agent_bin" "${claude_args[@]}" "$context
 
 User request:
 $prompt"

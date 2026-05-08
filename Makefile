@@ -1,4 +1,4 @@
-.PHONY: help build build-release test test-verbose clean fmt fmt-check clippy clippy-fix doc doc-open check install run-example docker-build docker-test docker-push pre-commit tree outdated bloat test-doc test-release package publish-dry-run coverage watch
+.PHONY: help build build-release test test-verbose test-wrappers clean fmt fmt-check clippy clippy-fix doc doc-open check install run-example docker-build docker-test docker-push pre-commit tree outdated bloat test-doc test-release package publish-dry-run coverage watch test-queue-pipeline
 
 # Default target
 .DEFAULT_GOAL := help
@@ -86,9 +86,17 @@ test-integration: ## Run integration tests only
 	@echo "$(CYAN)Running integration tests...$(NC)"
 	@$(CARGO) test --test lifecycle --test search --test mutation --test crash_recovery --test doctor_recovery --test encryption_capsule --test replay_integrity --test single_file --features $(FEATURES)
 
+test-queue-pipeline: ## Smoke test queue -> embedder -> ingestor -> recall with temp state
+	@echo "$(CYAN)Running queue pipeline smoke test...$(NC)"
+	@scripts/queue_pipeline_smoke.sh
+
 test-unit: ## Run unit tests only
 	@echo "$(CYAN)Running unit tests...$(NC)"
 	@$(CARGO) test --lib --features $(FEATURES)
+
+test-wrappers: ## Run shell tests for CLI launch wrappers
+	@echo "$(CYAN)Running wrapper launch tests...$(NC)"
+	@bash tests/wrappers/test_cli_launch_wrappers.sh
 
 fmt: ## Format code
 	@echo "$(CYAN)Formatting code...$(NC)"

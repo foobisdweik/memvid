@@ -10,6 +10,12 @@ Respond like smart caveman. Cut all filler, keep technical substance.
 
 # Repository Guidelines
 
+## Native Memory Hardening
+
+Do not use agent-native memory tools, memory caches, learned profiles, or cross-session recall for project facts, architecture, conventions, decisions, handoffs, or task state in this repository. Treat Memvid startup context as the only durable recall surface. Treat `/var/lib/memvid/queue` as the only durable write path.
+
+If an agent-native memory surface is available, ignore it for this project. Do not read it to answer project questions. Do not write it when work completes. Queue Markdown is the source of truth.
+
 ## Project Structure & Module Organization
 
 This is a Rust workspace. Core library code lives in `crates/core/src`, with integration tests in `crates/core/tests` and examples in `crates/core/examples`. Supporting binaries are split into focused crates: `crates/context` for startup recall, `crates/embedder` and `crates/ingestor` for queue processing, `crates/migrator` for legacy imports, and `crates/common` for shared settings and filesystem helpers. Deployment assets live in `deploy/`, installer packaging in `packaging/` and `install/`, Docker files in `docker/`, and user-facing docs in `docs/`.

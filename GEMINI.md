@@ -1,6 +1,6 @@
 # Gemini Instructions
 
-Follow `AGENTS.md`. Gemini-specific durable memory is disabled for project facts, architecture, conventions, and handoffs. Write those records as atomic queue Markdown to `/var/lib/memvid/queue/`.
+Follow `AGENTS.md`. Gemini-specific durable memory is disabled for project facts, architecture, conventions, decisions, handoffs, and task state. Do not use native Gemini memory tooling or caches for this repository. Write durable records only as atomic queue Markdown to `/var/lib/memvid/queue/`.
 
 Start sessions through installed `gemini-memvid` wrapper or shell function when available. It loads `memvid-context` and librarian automatically at CLI startup. Treat injected startup context as read-only recall and do not access `.mv2` stores directly.
 

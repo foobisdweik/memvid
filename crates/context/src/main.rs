@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const DEFAULT_BUDGET_TOKENS: usize = 4_000;
@@ -151,9 +151,23 @@ struct LibrarianRuntime {
 #[derive(Debug, Clone, Default)]
 struct LibrarianResult {
     active: bool,
+    candidate_count: usize,
+    elapsed_ms: u64,
     brief: Option<String>,
     selected_ids: Vec<String>,
     warning: Option<String>,
+}
+
+impl LibrarianResult {
+    fn status(&self) -> &'static str {
+        if !self.active {
+            "disabled"
+        } else if self.warning.is_some() {
+            "fallback"
+        } else {
+            "enabled"
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,12 +221,17 @@ fn main() -> Result<()> {
     dedupe_candidates(&mut candidates);
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     candidates = trim_candidates_for_budget(candidates, args.max_records);
+    let candidate_count = candidates.len();
     let librarian = librarian_runtime(&args, settings.librarian.as_ref());
-    let librarian_result = if let Some(runtime) = librarian.as_ref() {
-        rerank_with_librarian(runtime, &project, &cwd, &args.queries, &candidates)
+    let mut librarian_result = if let Some(runtime) = librarian.as_ref() {
+        let started = Instant::now();
+        let mut result = rerank_with_librarian(runtime, &project, &cwd, &args.queries, &candidates);
+        result.elapsed_ms = millis_u64(started.elapsed());
+        result
     } else {
         LibrarianResult::default()
     };
+    librarian_result.candidate_count = candidate_count;
     if librarian_result.active && !librarian_result.selected_ids.is_empty() {
         candidates = apply_librarian_selection(candidates, &librarian_result.selected_ids);
     }
@@ -572,6 +591,7 @@ fn rerank_with_librarian(
             brief: non_empty(&brief).map(truncate_brief),
             selected_ids,
             warning: None,
+            ..Default::default()
         },
         Err(err) => LibrarianResult {
             active: true,
@@ -579,6 +599,10 @@ fn rerank_with_librarian(
             ..Default::default()
         },
     }
+}
+
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn librarian_prompt(
@@ -1105,19 +1129,23 @@ fn normalize_for_dedupe(text: &str) -> String {
 fn render_packet(input: RenderInput<'_>) -> String {
     let mut out = String::new();
     let generated = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    push_block(
-        &mut out,
-        input.budget_chars,
-        &format!(
-            "# Memvid Startup Context\n\n- agent: `{}`\n- project: `{}`\n- cwd: `{}`\n- generated: `{generated}`\n- store_dir: `{}`\n- stores_searched: `{}`\n- compression_horizon: `7 days`\n- librarian: `{}`\n\n",
-            input.args.agent,
-            input.project,
-            input.cwd.display(),
-            input.store_dir.display(),
-            input.stores_searched,
-            if input.librarian.active { "enabled" } else { "disabled" }
-        ),
+    let mut header = format!(
+        "# Memvid Startup Context\n\n- agent: `{}`\n- project: `{}`\n- cwd: `{}`\n- generated: `{generated}`\n- store_dir: `{}`\n- stores_searched: `{}`\n- compression_horizon: `7 days`\n- librarian: `{}` (candidates: `{}`, selected: `{}`, elapsed_ms: `{}`)\n",
+        input.args.agent,
+        input.project,
+        input.cwd.display(),
+        input.store_dir.display(),
+        input.stores_searched,
+        input.librarian.status(),
+        input.librarian.candidate_count,
+        input.librarian.selected_ids.len(),
+        input.librarian.elapsed_ms,
     );
+    if let Some(warning) = input.librarian.warning.as_ref() {
+        header.push_str(&format!("- librarian_warning: `{}`\n", warning));
+    }
+    header.push('\n');
+    push_block(&mut out, input.budget_chars, &header);
     if let Some(brief) = input.librarian.brief.as_ref() {
         push_block(
             &mut out,
@@ -1128,7 +1156,7 @@ fn render_packet(input: RenderInput<'_>) -> String {
     push_block(
         &mut out,
         input.budget_chars,
-        "## Operating Rules\n\nAgents write durable memory only by atomically renaming Markdown files into `/var/lib/memvid/queue`. Do not invoke memvid binaries for writes. Do not touch `.mv2`, `/var/lib/memvid/processing`, `/var/lib/memvid/ingest`, `/var/lib/memvid/done`, `/var/lib/memvid/failed`, or `/var/lib/memvid/store`. Treat this packet as read-only startup recall.\n\n",
+        "## Operating Rules\n\nAgents write durable memory only by atomically renaming Markdown files into `/var/lib/memvid/queue`. Do not use agent-native memory tools, memory caches, learned profiles, or cross-session recall for project facts, architecture, conventions, decisions, handoffs, or task state. Do not invoke memvid binaries for writes. Do not touch `.mv2`, `/var/lib/memvid/processing`, `/var/lib/memvid/ingest`, `/var/lib/memvid/done`, `/var/lib/memvid/failed`, or `/var/lib/memvid/store`. Treat this packet as read-only startup recall.\n\n",
     );
     push_block(
         &mut out,
@@ -1144,6 +1172,12 @@ fn render_packet(input: RenderInput<'_>) -> String {
         (Section::Older, "## Older Canonical Facts"),
         (Section::Recall, "## Relevant Recall"),
     ];
+    let latest_handoff_frame = input
+        .candidates
+        .iter()
+        .filter(|candidate| classify(candidate) == Section::Handoff)
+        .max_by_key(|candidate| candidate.frame_ts)
+        .map(|candidate| candidate.frame_id);
     let mut rendered_any = false;
     for (section, title) in sections {
         let records: Vec<&Candidate> = input
@@ -1160,9 +1194,15 @@ fn render_packet(input: RenderInput<'_>) -> String {
         }
         let mut section_rendered = false;
         for candidate in records {
+            let expand_handoff =
+                latest_handoff_frame == Some(candidate.frame_id) && section == Section::Handoff;
             let record = format!(
                 "{}\n",
-                render_candidate(candidate, input.args.compression_horizon_hours)
+                render_candidate(
+                    candidate,
+                    input.args.compression_horizon_hours,
+                    expand_handoff,
+                )
             );
             if push_block(&mut out, input.budget_chars, &record) {
                 section_rendered = true;
@@ -1230,12 +1270,16 @@ fn classify(candidate: &Candidate) -> Section {
     Section::Recall
 }
 
-fn render_candidate(candidate: &Candidate, horizon_hours: f64) -> String {
+fn render_candidate(candidate: &Candidate, horizon_hours: f64, expand_handoff: bool) -> String {
     let max_chars = compression_limit(candidate, horizon_hours);
-    let compressed = compress_body(&candidate.body, max_chars, candidate.age_hours);
-    let source_date = candidate
-        .store_date
-        .map(|date| date.to_string())
+    let compressed = if expand_handoff {
+        compress_handoff_body(&candidate.body, max_chars.max(2_400))
+    } else {
+        compress_body(&candidate.body, max_chars, candidate.age_hours)
+    };
+    let source_date = timestamp_seconds(candidate.frame_ts)
+        .map(|timestamp| timestamp.date_naive().to_string())
+        .or_else(|| candidate.store_date.map(|date| date.to_string()))
         .unwrap_or_else(|| "unknown-date".to_string());
     let store_name = candidate
         .store
@@ -1256,6 +1300,51 @@ fn render_candidate(candidate: &Candidate, horizon_hours: f64) -> String {
         candidate.frame_ts,
         compressed
     )
+}
+
+fn compress_handoff_body(body: &str, max_chars: usize) -> String {
+    let body = strip_markdown_noise(body);
+    let mut parts = Vec::new();
+    let mut first_paragraph = Vec::new();
+    let mut in_plan_details = false;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !first_paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("Plan details:") {
+            break;
+        }
+        first_paragraph.push(trimmed);
+    }
+    if !first_paragraph.is_empty() {
+        parts.push(normalize_ws(&first_paragraph.join(" ")));
+    }
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("Plan details:") {
+            in_plan_details = true;
+            continue;
+        }
+        if in_plan_details {
+            if trimmed.starts_with("- ") {
+                parts.push(normalize_ws(trimmed));
+            } else if !trimmed.is_empty() {
+                break;
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        compress_body(&body, max_chars, 0.0)
+    } else {
+        truncate_clean(&parts.join("; "), max_chars)
+    }
 }
 
 fn compression_limit(candidate: &Candidate, horizon_hours: f64) -> usize {
@@ -1480,6 +1569,136 @@ mod tests {
         let older = candidate(RECENCY_CLIFF_HOURS + 0.1, 80.0);
         assert_eq!(classify(&fresh), Section::Fresh);
         assert_ne!(classify(&older), Section::Fresh);
+    }
+
+    #[test]
+    fn render_candidate_uses_frame_timestamp_date_for_project_shards() {
+        let mut candidate = candidate(1.0, 100.0);
+        candidate.frame_ts = 1_778_222_734;
+
+        let rendered = render_candidate(&candidate, DEFAULT_COMPRESSION_HORIZON_HOURS, false);
+
+        assert!(rendered.starts_with("- [2026-05-08 frame:1"));
+        assert!(!rendered.contains("unknown-date"));
+    }
+
+    #[test]
+    fn only_latest_handoff_renders_plan_details() {
+        let args = Args::parse_from(["memvid-context", "--budget-tokens", "2000"]);
+        let mut older = candidate(DEFAULT_COMPRESSION_HORIZON_HOURS + 1.0, 100.0);
+        older.frame_id = 1;
+        older.frame_ts = 1_700_000_000;
+        older.header.values.insert("type".into(), "handoff".into());
+        older.body = format!(
+            "Older summary.\n\nPlan details:\n- {} Older detail kept only if latest.",
+            "padding ".repeat(80)
+        );
+
+        let mut latest = candidate(1.0, 100.0);
+        latest.frame_id = 2;
+        latest.frame_ts = 1_778_222_734;
+        latest.header.values.insert("type".into(), "handoff".into());
+        latest.body = "Latest summary.\n\nPlan details:\n- Non-shell launchers.\n- Wrapper regression tests.\n- Startup diagnostics.\n- Full integration.\n- Installer dry-run.".into();
+
+        let output = render_packet(RenderInput {
+            args: &args,
+            project: "memvid",
+            cwd: Path::new("/home/foobis/memvid"),
+            store_dir: Path::new("/var/lib/memvid/store"),
+            stores_searched: 1,
+            candidates: &[older, latest],
+            errors: &[],
+            budget_chars: 8_000,
+            librarian: &LibrarianResult::default(),
+        });
+
+        assert!(output.contains("Latest summary."));
+        assert!(output.contains("Non-shell launchers."));
+        assert!(output.contains("Installer dry-run."));
+        assert!(!output.contains("Older detail kept only if latest."));
+    }
+
+    #[test]
+    fn render_header_reports_disabled_librarian_diagnostics() {
+        let args = Args::parse_from(["memvid-context", "--budget-tokens", "2000"]);
+        let output = render_packet(RenderInput {
+            args: &args,
+            project: "memvid",
+            cwd: Path::new("/home/foobis/memvid"),
+            store_dir: Path::new("/var/lib/memvid/store"),
+            stores_searched: 1,
+            candidates: &[],
+            errors: &[],
+            budget_chars: 8_000,
+            librarian: &LibrarianResult {
+                candidate_count: 3,
+                ..Default::default()
+            },
+        });
+
+        assert!(output
+            .contains("- librarian: `disabled` (candidates: `3`, selected: `0`, elapsed_ms: `0`)"));
+        assert!(output.contains("Do not use agent-native memory tools"));
+        assert!(!output.contains("librarian_warning"));
+    }
+
+    #[test]
+    fn render_header_reports_enabled_librarian_diagnostics() {
+        let args = Args::parse_from(["memvid-context", "--budget-tokens", "2000"]);
+        let selected_ids = vec!["memvid.mv2:1".to_string(), "memvid.mv2:2".to_string()];
+        let librarian = LibrarianResult {
+            active: true,
+            candidate_count: 7,
+            elapsed_ms: 42,
+            brief: None,
+            selected_ids,
+            warning: None,
+        };
+        let output = render_packet(RenderInput {
+            args: &args,
+            project: "memvid",
+            cwd: Path::new("/home/foobis/memvid"),
+            store_dir: Path::new("/var/lib/memvid/store"),
+            stores_searched: 1,
+            candidates: &[],
+            errors: &[],
+            budget_chars: 8_000,
+            librarian: &librarian,
+        });
+
+        assert!(output
+            .contains("- librarian: `enabled` (candidates: `7`, selected: `2`, elapsed_ms: `42`)"));
+        assert!(!output.contains("librarian_warning"));
+    }
+
+    #[test]
+    fn render_header_reports_librarian_fallback_warning_without_store_errors() {
+        let args = Args::parse_from(["memvid-context", "--budget-tokens", "2000"]);
+        let librarian = LibrarianResult {
+            active: true,
+            candidate_count: 5,
+            elapsed_ms: 11,
+            brief: None,
+            selected_ids: Vec::new(),
+            warning: Some("request failed: offline".to_string()),
+        };
+        let output = render_packet(RenderInput {
+            args: &args,
+            project: "memvid",
+            cwd: Path::new("/home/foobis/memvid"),
+            store_dir: Path::new("/var/lib/memvid/store"),
+            stores_searched: 1,
+            candidates: &[],
+            errors: &["librarian: request failed: offline".to_string()],
+            budget_chars: 8_000,
+            librarian: &librarian,
+        });
+
+        assert!(output.contains(
+            "- librarian: `fallback` (candidates: `5`, selected: `0`, elapsed_ms: `11`)"
+        ));
+        assert!(output.contains("- librarian_warning: `request failed: offline`"));
+        assert!(!output.contains("## Store Read Warnings"));
     }
 
     #[test]

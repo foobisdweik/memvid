@@ -28,6 +28,25 @@ Installed shell integration should make normal CLI launches route through Memvid
 - Wrappers locate sibling `memvid-context` first, then fall back to `PATH`.
 - Wrappers fail open: if startup recall fails, they launch the agent with a small fallback packet instead of blocking the CLI.
 
+## Non-Shell Launchers
+
+Launchers that do not evaluate shell startup files must call wrappers directly. Use installed wrapper paths as the command, then pass normal agent arguments unchanged:
+
+```text
+/usr/local/bin/codex-memvid
+/usr/local/bin/claude-memvid
+/usr/local/bin/gemini-memvid
+/usr/local/bin/memvid-context-wrap -- your-agent-command
+```
+
+Desktop entries, IDE tasks, service managers, and other non-interactive launchers should point at `*-memvid` wrappers rather than raw agent binaries. Absolute calls to raw `codex`, `claude`, or `gemini` bypass Memvid startup recall because shell functions are not involved.
+
+Use `memvid-context-wrap` for agents without a dedicated wrapper. It prepends Memvid startup context to the command after `--`:
+
+```bash
+/usr/local/bin/memvid-context-wrap -- /opt/tools/agent --flag value
+```
+
 ## Compression
 
 Startup recall uses a 7-day chrono-semantic horizon:
@@ -51,7 +70,7 @@ Queue ingestion writes stable shards under `/var/lib/memvid/store`:
 
 The injector opens stores read-only and falls back to a temporary snapshot copy if the live writer lock blocks direct reads. Startup context should be selected from the active project shard plus explicit global records. Other project shards are hidden unless `--include-other-projects` is set for debugging or migration.
 
-Agents should treat injected context as read-only and write durable updates only through `/var/lib/memvid/queue`. Use `[project:global]` only for explicit cross-project coordination; normal workspace notes belong in the current project shard.
+Agents should treat injected context as read-only and write durable updates only through `/var/lib/memvid/queue`. Do not use agent-native memory tools, memory caches, learned profiles, or cross-session recall for project facts, architecture, conventions, decisions, handoffs, or task state. Use `[project:global]` only for explicit cross-project coordination; normal workspace notes belong in the current project shard.
 
 ## Librarian Mode
 
@@ -62,6 +81,7 @@ Agents should treat injected context as read-only and write durable updates only
 - Librarian sees only active project shard plus explicit global records.
 - Valid librarian JSON can narrow final packet to selected record IDs and add short session brief.
 - Timeouts, HTTP errors, malformed JSON, invalid IDs, over-selection, or empty selections fall back to heuristic recall.
+- Packet header reports compact librarian diagnostics: status `enabled`, `disabled`, or `fallback`; candidate count; selected count; elapsed milliseconds; and `librarian_warning` when fallback occurs. `--include-store-errors` still controls detailed store warning blocks, but librarian fallback warning stays visible in header diagnostics.
 
 Default local Qwen3/Ollama profile:
 

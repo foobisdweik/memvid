@@ -45,6 +45,10 @@ if ! context="$(MEMVID_AGENT=codex "$context_bin" --agent codex 2>"$context_err"
 - librarian: \`fallback\`
 - warning: \`memvid-context failed; launching agent without recalled memory\`
 
+## Operating Rules
+
+Do not use agent-native memory tools, memory caches, learned profiles, or cross-session recall for project facts, architecture, conventions, decisions, handoffs, or task state. Durable memory writes go only through atomic Markdown files in \`/var/lib/memvid/queue\`.
+
 ## memvid-context stderr
 
 \`\`\`text

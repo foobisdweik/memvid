@@ -26,6 +26,8 @@ The bundle contains:
 - rebuildable source snapshot installed to `/opt/memvid/source`
 - installer logic for settings, state dirs, systemd units, and shell functions
 
+Non-shell launchers should call installed wrapper binaries directly, for example `/usr/local/bin/codex-memvid`, `/usr/local/bin/claude-memvid`, `/usr/local/bin/gemini-memvid`, or `/usr/local/bin/memvid-context-wrap -- your-agent-command`. Shell functions only affect interactive shells that source the installed rc block; absolute raw agent paths bypass Memvid startup recall.
+
 The `.run` file is intentionally uncompressed. It is the fast local installer.
 
 The `.run.tar.xz` file is the compressed transfer artifact. It is what you copy over the network, upload, archive, or share. Extract it first, then run the resulting `.run`.

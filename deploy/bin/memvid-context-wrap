@@ -26,6 +26,10 @@ if ! "$context_bin" "${args[@]}" > "$tmp"; then
 - agent: \`$agent\`
 - librarian: \`fallback\`
 - warning: \`memvid-context failed; launching command without recalled memory\`
+
+## Operating Rules
+
+Do not use agent-native memory tools, memory caches, learned profiles, or cross-session recall for project facts, architecture, conventions, decisions, handoffs, or task state. Durable memory writes go only through atomic Markdown files in \`/var/lib/memvid/queue\`.
 EOF
 fi
 chmod 0600 "$tmp"

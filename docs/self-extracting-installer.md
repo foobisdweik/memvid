@@ -64,7 +64,7 @@ Install:
 sudo ./dist/memvid-bootstrap-x86_64-linux.run
 ```
 
-On CachyOS, the default install is intended to be close to one-run: it installs Memvid binaries, CUDA/cuDNN runtime packages, CachyOS NVIDIA modules for installed kernels, Ollama with CUDA support, starts `ollama.service`, pulls `qwen3:8b`, writes Memvid settings, enables Memvid services, and installs shell launch wrappers.
+On CachyOS, the default install is intended to be close to one-run: it installs Memvid binaries, CUDA/cuDNN runtime packages, CachyOS NVIDIA modules for installed kernels, Rust build toolchains, Ollama with CUDA support, starts `ollama.service`, pulls `qwen3:8b`, writes Memvid settings, enables Memvid services, and installs shell launch wrappers.
 
 Dry run:
 
@@ -82,6 +82,7 @@ Default model dir is `/opt/models/nomic-embed-text-v1`; `--model-dir` overrides 
 --no-aliases
 --no-ollama
 --no-librarian-model
+--no-rust
 --user USER
 --prefix /usr/local
 --config-dir /etc/memvid
@@ -90,6 +91,8 @@ Default model dir is `/opt/models/nomic-embed-text-v1`; `--model-dir` overrides 
 --source-dir /opt/memvid/source
 --librarian-model qwen3:8b
 --ollama-timeout 120
+--rust-toolchain 1.90.0
+--rust-nightly nightly
 --cachyos-nvidia installed
 --nvidia-flavor open
 ```
@@ -99,6 +102,7 @@ Default model dir is `/opt/models/nomic-embed-text-v1`; `--model-dir` overrides 
 On CachyOS and other pacman systems, the installer now attempts to install:
 
 - `curl`, `tar`, `xz`, `coreutils`, `findutils`, `gawk`, `sed`, and `openssl`
+- `rustup`, `base-devel`, `git`, `clang`, `cmake`, `pkgconf`, `lld`, and `mold`
 - `cuda`
 - `cudnn`
 - `nvidia-utils`
@@ -108,6 +112,8 @@ On CachyOS and other pacman systems, the installer now attempts to install:
 - matching CachyOS prebuilt NVIDIA module packages
 
 If `ollama.service` exists, the installer enables and starts it, waits up to `--ollama-timeout` seconds for `http://127.0.0.1:11434`, then runs `ollama pull qwen3:8b`. Use `--no-ollama` to skip Ollama package/service/model setup, or `--no-librarian-model` to install/start Ollama without pulling the model.
+
+Rust setup uses distro `rustup` and installs the repo release toolchain `1.90.0` with `rustfmt`, `clippy`, and the targets listed in `rust-toolchain.toml`, plus a minimal `nightly` host toolchain for investigation/profiling workflows. Use `--no-rust` to skip this, or override with `--rust-toolchain` and `--rust-nightly`.
 
 Default CachyOS behavior is conservative:
 
@@ -137,7 +143,7 @@ The installer is intentionally robust, but not magic:
 
 - It targets x86_64 glibc Linux.
 - CUDA service startup still requires a working NVIDIA driver.
-- Debian/Ubuntu and Arch/CachyOS CUDA/runtime/Ollama packages are installed best-effort.
+- Debian/Ubuntu and Arch/CachyOS CUDA/runtime/Ollama/Rust packages are installed best-effort.
 - CachyOS NVIDIA support depends on enabled CachyOS repositories matching the machine architecture tier.
 - Other distributions receive explicit warnings because CUDA/cuDNN package names depend on enabled repositories.
 - Alpine/musl is not supported by these prebuilt binaries.

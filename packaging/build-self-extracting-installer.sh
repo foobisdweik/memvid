@@ -116,9 +116,12 @@ Common options:
   --no-aliases            Do not update root/user shell functions and wrappers.
   --no-ollama
   --no-librarian-model
+  --no-rust
   --user USER
   --librarian-model MODEL
   --ollama-timeout SECONDS
+  --rust-toolchain TOOLCHAIN
+  --rust-nightly TOOLCHAIN
   --cachyos-nvidia installed|all|skip
   --nvidia-flavor open|closed|auto
   --help

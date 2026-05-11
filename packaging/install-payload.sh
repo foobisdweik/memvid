@@ -9,6 +9,7 @@ INSTALL_SERVICES=1
 INSTALL_ALIASES=1
 INSTALL_OLLAMA=1
 PULL_LIBRARIAN_MODEL=1
+INSTALL_RUST=1
 PREFIX=/usr/local
 CONFIG_DIR=/etc/memvid
 STATE_DIR=/var/lib/memvid
@@ -18,6 +19,8 @@ CACHYOS_NVIDIA_SCOPE=installed
 CACHYOS_NVIDIA_FLAVOR=open
 LIBRARIAN_MODEL=qwen3:8b
 OLLAMA_TIMEOUT_SECONDS=120
+RUST_TOOLCHAIN=1.90.0
+RUST_NIGHTLY_TOOLCHAIN=nightly
 RUN_USER="${SUDO_USER:-}"
 RUN_GROUP=""
 
@@ -40,6 +43,7 @@ Options:
   --no-aliases           Do not update root/user shell functions and wrappers.
   --no-ollama            Do not install/enable/start Ollama.
   --no-librarian-model   Do not pull the configured librarian model with Ollama.
+  --no-rust              Do not install Rust build toolchains.
   --user USER            Service/data owner user. Defaults to omen when present.
   --prefix PATH          Install prefix for binaries/libs/share. Default: /usr/local.
   --config-dir PATH      Config directory. Default: /etc/memvid.
@@ -48,6 +52,8 @@ Options:
   --source-dir PATH      Source snapshot extract directory. Default: /opt/memvid/source.
   --librarian-model NAME Ollama model for librarian recall. Default: qwen3:8b.
   --ollama-timeout SEC   Seconds to wait for Ollama readiness. Default: 120.
+  --rust-toolchain NAME  Rust release toolchain to install. Default: 1.90.0.
+  --rust-nightly NAME    Rust nightly toolchain to install. Default: nightly.
   --cachyos-nvidia SCOPE CachyOS NVIDIA modules: installed, all, or skip. Default: installed.
   --nvidia-flavor FLAVOR NVIDIA kernel module flavor: open, closed, or auto. Default: open.
   -h, --help             Show this help.
@@ -62,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --no-aliases) INSTALL_ALIASES=0 ;;
     --no-ollama) INSTALL_OLLAMA=0; PULL_LIBRARIAN_MODEL=0 ;;
     --no-librarian-model) PULL_LIBRARIAN_MODEL=0 ;;
+    --no-rust) INSTALL_RUST=0 ;;
     --user) RUN_USER="${2:?--user requires a value}"; shift ;;
     --prefix) PREFIX="${2:?--prefix requires a value}"; shift ;;
     --config-dir) CONFIG_DIR="${2:?--config-dir requires a value}"; shift ;;
@@ -70,6 +77,8 @@ while [[ $# -gt 0 ]]; do
     --source-dir) SOURCE_DIR="${2:?--source-dir requires a value}"; shift ;;
     --librarian-model) LIBRARIAN_MODEL="${2:?--librarian-model requires a value}"; shift ;;
     --ollama-timeout) OLLAMA_TIMEOUT_SECONDS="${2:?--ollama-timeout requires a value}"; shift ;;
+    --rust-toolchain) RUST_TOOLCHAIN="${2:?--rust-toolchain requires a value}"; shift ;;
+    --rust-nightly) RUST_NIGHTLY_TOOLCHAIN="${2:?--rust-nightly requires a value}"; shift ;;
     --cachyos-nvidia) CACHYOS_NVIDIA_SCOPE="${2:?--cachyos-nvidia requires a value}"; shift ;;
     --nvidia-flavor) CACHYOS_NVIDIA_FLAVOR="${2:?--nvidia-flavor requires a value}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -112,6 +121,25 @@ run() {
     printf '\n'
   else
     "$@"
+  fi
+}
+
+run_as_user() {
+  local user="$1"
+  shift
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '[dry-run] as %q' "$user"
+    printf ' %q' "$@"
+    printf '\n'
+  elif [[ "$user" == "root" ]]; then
+    "$@"
+  elif have runuser; then
+    runuser -u "$user" -- "$@"
+  elif have sudo; then
+    sudo -u "$user" "$@"
+  else
+    warn "Cannot run command as $user; missing runuser and sudo."
+    return 1
   fi
 }
 
@@ -267,6 +295,9 @@ install_cachyos_nvidia_modules() {
 install_pacman_deps() {
   msg "Installing Arch/CachyOS CUDA runtime packages"
   local pkgs=(ca-certificates curl tar xz coreutils findutils gawk sed openssl cuda cudnn nvidia-utils libglvnd)
+  if [[ "$INSTALL_RUST" -eq 1 ]]; then
+    pkgs+=(rustup base-devel git clang cmake pkgconf lld mold)
+  fi
   if [[ "$INSTALL_OLLAMA" -eq 1 ]]; then
     pkgs+=(ollama ollama-cuda)
   fi
@@ -276,6 +307,39 @@ install_pacman_deps() {
     install_cachyos_nvidia_modules
   else
     warn "Arch-like system detected but not CachyOS; install a matching NVIDIA module or DKMS package for the active kernel if provider loading fails."
+  fi
+}
+
+bootstrap_rust() {
+  [[ "$INSTALL_RUST" -eq 1 ]] || return 0
+
+  msg "Bootstrapping Rust build toolchains"
+  if ! have rustup; then
+    warn "rustup command not found; Rust toolchain install skipped."
+    return 0
+  fi
+  if ! id "$RUN_USER" >/dev/null 2>&1; then
+    warn "User '$RUN_USER' does not exist; Rust toolchain install skipped."
+    return 0
+  fi
+
+  local host_target="x86_64-unknown-linux-gnu"
+  local source_targets=(
+    aarch64-apple-darwin
+    x86_64-apple-darwin
+    x86_64-pc-windows-msvc
+    x86_64-unknown-linux-gnu
+  )
+  local stable_args=(rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy)
+  local target
+  for target in "${source_targets[@]}"; do
+    stable_args+=(--target "$target")
+  done
+  if ! run_as_user "$RUN_USER" "${stable_args[@]}"; then
+    warn "Rust toolchain install failed for $RUST_TOOLCHAIN; rebuild from source may need manual rustup repair."
+  fi
+  if ! run_as_user "$RUN_USER" rustup toolchain install "$RUST_NIGHTLY_TOOLCHAIN" --profile minimal --component rustfmt --component clippy --target "$host_target"; then
+    warn "Rust nightly install failed for $RUST_NIGHTLY_TOOLCHAIN; nightly-only rebuild tasks may need manual rustup repair."
   fi
 }
 
@@ -618,6 +682,7 @@ main() {
   install_deps
   install_files
   create_state_dirs
+  bootstrap_rust
   bootstrap_ollama
   install_services
   install_aliases

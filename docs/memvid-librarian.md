@@ -70,7 +70,7 @@ Model choice is external research. Framework requirements:
 - returns JSON within startup latency budget
 - never receives unrelated project shards or implicit cross-project data
 
-Default Ollama profile for `qwen3:8b` uses 12 candidates, max 6 selected records, 20s timeout, 512 output tokens, `temperature = 0.0`, `top_p = 1.0`, `presence_penalty = 1.5`, `keep_alive = "-1"`, and `/no_think` in the user prompt. Run `bash scripts/memvid-librarian-cold.sh` to unload the model for the current machine session; next normal agent startup wakes it again.
+Default Ollama profile for `qwen3:8b` uses 6 candidates, max 6 selected records, 30s timeout, 512 output tokens, `temperature = 0.0`, `top_p = 1.0`, `presence_penalty = 1.5`, `keep_alive = "-1"`, `reasoning_effort = "none"` in the OpenAI-compatible request, and `/no_think` in the user prompt. Run `bash scripts/memvid-librarian-cold.sh` to unload the model for the current machine session; next normal agent startup wakes it again.
 
 ## Admin Workflow
 

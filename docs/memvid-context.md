@@ -91,8 +91,8 @@ Default local Qwen3/Ollama profile:
 enabled = true
 endpoint = "http://127.0.0.1:11434/v1/chat/completions"
 model = "qwen3:8b"
-timeout_ms = 20000
-max_candidates = 12
+timeout_ms = 30000
+max_candidates = 6
 max_selected = 6
 max_tokens = 512
 temperature = 0.0

@@ -68,11 +68,11 @@ fn default_librarian_queue() -> String {
 }
 
 fn default_librarian_timeout_ms() -> u64 {
-    20_000
+    30_000
 }
 
 fn default_librarian_max_candidates() -> usize {
-    12
+    6
 }
 
 fn default_librarian_max_selected() -> usize {

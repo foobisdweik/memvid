@@ -7,6 +7,8 @@ DRY_RUN=0
 INSTALL_DEPS=1
 INSTALL_SERVICES=1
 INSTALL_ALIASES=1
+INSTALL_OLLAMA=1
+PULL_LIBRARIAN_MODEL=1
 PREFIX=/usr/local
 CONFIG_DIR=/etc/memvid
 STATE_DIR=/var/lib/memvid
@@ -14,6 +16,8 @@ MODEL_DIR=/opt/models/nomic-embed-text-v1
 SOURCE_DIR=/opt/memvid/source
 CACHYOS_NVIDIA_SCOPE=installed
 CACHYOS_NVIDIA_FLAVOR=open
+LIBRARIAN_MODEL=qwen3:8b
+OLLAMA_TIMEOUT_SECONDS=120
 RUN_USER="${SUDO_USER:-}"
 RUN_GROUP=""
 
@@ -34,12 +38,16 @@ Options:
   --no-deps              Do not attempt package-manager dependency installation.
   --no-services          Do not install/enable/start systemd services.
   --no-aliases           Do not update root/user shell functions and wrappers.
+  --no-ollama            Do not install/enable/start Ollama.
+  --no-librarian-model   Do not pull the configured librarian model with Ollama.
   --user USER            Service/data owner user. Defaults to omen when present.
   --prefix PATH          Install prefix for binaries/libs/share. Default: /usr/local.
   --config-dir PATH      Config directory. Default: /etc/memvid.
   --state-dir PATH       State directory. Default: /var/lib/memvid.
   --model-dir PATH       Model directory. Default: /opt/models/nomic-embed-text-v1.
   --source-dir PATH      Source snapshot extract directory. Default: /opt/memvid/source.
+  --librarian-model NAME Ollama model for librarian recall. Default: qwen3:8b.
+  --ollama-timeout SEC   Seconds to wait for Ollama readiness. Default: 120.
   --cachyos-nvidia SCOPE CachyOS NVIDIA modules: installed, all, or skip. Default: installed.
   --nvidia-flavor FLAVOR NVIDIA kernel module flavor: open, closed, or auto. Default: open.
   -h, --help             Show this help.
@@ -52,12 +60,16 @@ while [[ $# -gt 0 ]]; do
     --no-deps) INSTALL_DEPS=0 ;;
     --no-services) INSTALL_SERVICES=0 ;;
     --no-aliases) INSTALL_ALIASES=0 ;;
+    --no-ollama) INSTALL_OLLAMA=0; PULL_LIBRARIAN_MODEL=0 ;;
+    --no-librarian-model) PULL_LIBRARIAN_MODEL=0 ;;
     --user) RUN_USER="${2:?--user requires a value}"; shift ;;
     --prefix) PREFIX="${2:?--prefix requires a value}"; shift ;;
     --config-dir) CONFIG_DIR="${2:?--config-dir requires a value}"; shift ;;
     --state-dir) STATE_DIR="${2:?--state-dir requires a value}"; shift ;;
     --model-dir) MODEL_DIR="${2:?--model-dir requires a value}"; shift ;;
     --source-dir) SOURCE_DIR="${2:?--source-dir requires a value}"; shift ;;
+    --librarian-model) LIBRARIAN_MODEL="${2:?--librarian-model requires a value}"; shift ;;
+    --ollama-timeout) OLLAMA_TIMEOUT_SECONDS="${2:?--ollama-timeout requires a value}"; shift ;;
     --cachyos-nvidia) CACHYOS_NVIDIA_SCOPE="${2:?--cachyos-nvidia requires a value}"; shift ;;
     --nvidia-flavor) CACHYOS_NVIDIA_FLAVOR="${2:?--nvidia-flavor requires a value}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -66,9 +78,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if [[ "$(id -u)" -ne 0 ]]; then
+if [[ "$(id -u)" -ne 0 && "$DRY_RUN" -ne 1 ]]; then
   echo "This installer needs root privileges. Re-run with sudo or as root." >&2
   exit 1
+elif [[ "$(id -u)" -ne 0 ]]; then
+  echo "WARN: dry-run running without root; privileged actions will only be printed." >&2
 fi
 
 case "$CACHYOS_NVIDIA_SCOPE" in
@@ -79,6 +93,10 @@ esac
 case "$CACHYOS_NVIDIA_FLAVOR" in
   open|closed|auto) ;;
   *) echo "--nvidia-flavor must be open, closed, or auto" >&2; exit 2 ;;
+esac
+
+case "$OLLAMA_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) echo "--ollama-timeout must be a non-negative integer" >&2; exit 2 ;;
 esac
 
 if id "$RUN_USER" >/dev/null 2>&1; then
@@ -248,7 +266,11 @@ install_cachyos_nvidia_modules() {
 
 install_pacman_deps() {
   msg "Installing Arch/CachyOS CUDA runtime packages"
-  pacman_install_available ca-certificates cuda cudnn nvidia-utils libglvnd
+  local pkgs=(ca-certificates curl tar xz coreutils findutils gawk sed openssl cuda cudnn nvidia-utils libglvnd)
+  if [[ "$INSTALL_OLLAMA" -eq 1 ]]; then
+    pkgs+=(ollama ollama-cuda)
+  fi
+  pacman_install_available "${pkgs[@]}"
 
   if is_cachyos; then
     install_cachyos_nvidia_modules
@@ -325,7 +347,7 @@ commit_interval = 32
 [librarian]
 enabled = true
 endpoint = "http://127.0.0.1:11434/v1/chat/completions"
-model = "qwen3:8b"
+model = "$LIBRARIAN_MODEL"
 timeout_ms = 30000
 max_candidates = 6
 max_selected = 6
@@ -354,6 +376,76 @@ install_files() {
     tar -xf "$SELF_DIR/source/memvid-source.tar" -C "$SOURCE_DIR"
   fi
   write_settings
+}
+
+ollama_base_url() {
+  printf '%s\n' "http://127.0.0.1:11434"
+}
+
+wait_for_ollama() {
+  local base="$1"
+  local waited=0
+  if ! have curl; then
+    warn "curl not found; cannot poll Ollama readiness."
+    return 1
+  fi
+  while (( waited <= OLLAMA_TIMEOUT_SECONDS )); do
+    if curl -fsS "$base/api/tags" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+ollama_model_present() {
+  local model="$1"
+  ollama list 2>/dev/null | awk -v model="$model" 'NR > 1 && $1 == model { found=1 } END { exit found ? 0 : 1 }'
+}
+
+bootstrap_ollama() {
+  [[ "$INSTALL_OLLAMA" -eq 1 || "$PULL_LIBRARIAN_MODEL" -eq 1 ]] || return 0
+
+  msg "Bootstrapping Ollama librarian runtime"
+  if ! have ollama; then
+    warn "ollama command not found; install/pull skipped."
+    return 0
+  fi
+
+  local base
+  base="$(ollama_base_url)"
+  if have systemctl && [[ -d /run/systemd/system || -d /etc/systemd/system ]]; then
+    if systemctl list-unit-files ollama.service >/dev/null 2>&1; then
+      if ! run systemctl enable --now ollama.service; then
+        warn "Failed to enable/start ollama.service; try: systemctl status ollama.service"
+      fi
+    else
+      warn "ollama.service not found; start Ollama manually with: ollama serve"
+    fi
+  else
+    warn "systemd not detected; start Ollama manually with: ollama serve"
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] wait for Ollama at $base"
+    [[ "$PULL_LIBRARIAN_MODEL" -eq 0 ]] || echo "[dry-run] ollama pull $LIBRARIAN_MODEL"
+    return 0
+  fi
+
+  if ! wait_for_ollama "$base"; then
+    warn "Ollama did not become ready at $base within ${OLLAMA_TIMEOUT_SECONDS}s; librarian model pull skipped."
+    return 0
+  fi
+
+  if [[ "$PULL_LIBRARIAN_MODEL" -eq 1 ]]; then
+    if ollama_model_present "$LIBRARIAN_MODEL"; then
+      msg "Ollama model already present: $LIBRARIAN_MODEL"
+    else
+      msg "Pulling Ollama librarian model: $LIBRARIAN_MODEL"
+      ollama pull "$LIBRARIAN_MODEL"
+    fi
+  fi
 }
 
 create_state_dirs() {
@@ -526,6 +618,7 @@ main() {
   install_deps
   install_files
   create_state_dirs
+  bootstrap_ollama
   install_services
   install_aliases
   verify_install

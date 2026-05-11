@@ -24,13 +24,15 @@ The bundle contains:
 - Nomic ONNX model and tokenizer
 - ONNX Runtime provider libraries
 - rebuildable source snapshot installed to `/opt/memvid/source`
-- installer logic for settings, state dirs, systemd units, and shell functions
+- installer logic for settings, state dirs, systemd units, shell functions, Ollama startup, and librarian model pull
 
 Non-shell launchers should call installed wrapper binaries directly, for example `/usr/local/bin/codex-memvid`, `/usr/local/bin/claude-memvid`, `/usr/local/bin/gemini-memvid`, or `/usr/local/bin/memvid-context-wrap -- your-agent-command`. Shell functions only affect interactive shells that source the installed rc block; absolute raw agent paths bypass Memvid startup recall.
 
 The `.run` file is intentionally uncompressed. It is the fast local installer.
 
 The `.run.tar.xz` file is the compressed transfer artifact. It is what you copy over the network, upload, archive, or share. Extract it first, then run the resulting `.run`.
+
+Large installer artifacts belong in GitHub Releases, not git history. The repository ignores `/dist`; upload `memvid-bootstrap-x86_64-linux.run.tar.xz` as a release asset and keep generated `.run`, `.tar.xz`, model payloads, and other package blobs out of `main`.
 
 This layout is intentionally simple:
 
@@ -62,10 +64,12 @@ Install:
 sudo ./dist/memvid-bootstrap-x86_64-linux.run
 ```
 
+On CachyOS, the default install is intended to be close to one-run: it installs Memvid binaries, CUDA/cuDNN runtime packages, CachyOS NVIDIA modules for installed kernels, Ollama with CUDA support, starts `ollama.service`, pulls `qwen3:8b`, writes Memvid settings, enables Memvid services, and installs shell launch wrappers.
+
 Dry run:
 
 ```bash
-sudo ./dist/memvid-bootstrap-x86_64-linux.run --dry-run
+./dist/memvid-bootstrap-x86_64-linux.run --dry-run
 ```
 
 Useful options:
@@ -76,12 +80,16 @@ Default model dir is `/opt/models/nomic-embed-text-v1`; `--model-dir` overrides 
 --no-deps
 --no-services
 --no-aliases
+--no-ollama
+--no-librarian-model
 --user USER
 --prefix /usr/local
 --config-dir /etc/memvid
 --state-dir /var/lib/memvid
 --model-dir /opt/models/nomic-embed-text-v1
 --source-dir /opt/memvid/source
+--librarian-model qwen3:8b
+--ollama-timeout 120
 --cachyos-nvidia installed
 --nvidia-flavor open
 ```
@@ -90,11 +98,16 @@ Default model dir is `/opt/models/nomic-embed-text-v1`; `--model-dir` overrides 
 
 On CachyOS and other pacman systems, the installer now attempts to install:
 
+- `curl`, `tar`, `xz`, `coreutils`, `findutils`, `gawk`, `sed`, and `openssl`
 - `cuda`
 - `cudnn`
 - `nvidia-utils`
 - `libglvnd`
+- `ollama`
+- `ollama-cuda`
 - matching CachyOS prebuilt NVIDIA module packages
+
+If `ollama.service` exists, the installer enables and starts it, waits up to `--ollama-timeout` seconds for `http://127.0.0.1:11434`, then runs `ollama pull qwen3:8b`. Use `--no-ollama` to skip Ollama package/service/model setup, or `--no-librarian-model` to install/start Ollama without pulling the model.
 
 Default CachyOS behavior is conservative:
 
@@ -124,10 +137,11 @@ The installer is intentionally robust, but not magic:
 
 - It targets x86_64 glibc Linux.
 - CUDA service startup still requires a working NVIDIA driver.
-- Debian/Ubuntu and Arch/CachyOS CUDA runtime packages are installed best-effort.
+- Debian/Ubuntu and Arch/CachyOS CUDA/runtime/Ollama packages are installed best-effort.
 - CachyOS NVIDIA support depends on enabled CachyOS repositories matching the machine architecture tier.
 - Other distributions receive explicit warnings because CUDA/cuDNN package names depend on enabled repositories.
 - Alpine/musl is not supported by these prebuilt binaries.
 - systemd services are installed only when systemd is present.
+- `qwen3:8b` pull requires network access to Ollama's model registry unless the model already exists on the machine.
 
-On non-systemd hosts, the binaries/config/model still install; run `memvid-ingestor` and `memvid-embedder` under the host's service manager with `MEMVID_CONFIG=/etc/memvid/settings.toml`.
+On non-systemd hosts, the binaries/config/model still install; run `ollama serve`, `memvid-ingestor`, and `memvid-embedder` under the host's service manager with `MEMVID_CONFIG=/etc/memvid/settings.toml`.

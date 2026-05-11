@@ -114,7 +114,11 @@ Common options:
   --no-deps
   --no-services
   --no-aliases            Do not update root/user shell functions and wrappers.
+  --no-ollama
+  --no-librarian-model
   --user USER
+  --librarian-model MODEL
+  --ollama-timeout SECONDS
   --cachyos-nvidia installed|all|skip
   --nvidia-flavor open|closed|auto
   --help

@@ -4,65 +4,52 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 2.x     | :white_check_mark: |
-| < 2.0   | :x:                |
+| 3.x     | :white_check_mark: |
+| < 3.0   | :x:                |
+
+Version 3 is a ground-up rewrite. Prior versions (Rust workspace with embedder/ingestor pipeline) are out of scope for security maintenance.
 
 ## Reporting a Vulnerability
 
-We take security seriously at Memvid. If you discover a security vulnerability, please report it responsibly.
+Do not open a public GitHub issue for security vulnerabilities. Email **security@memvid.com** instead.
 
-### How to Report
+Include in your report:
 
-**Please do NOT open a public GitHub issue for security vulnerabilities.**
+- Description of the vulnerability.
+- Steps to reproduce.
+- Potential impact.
+- Suggested fix (if any).
 
-Instead, email us at: **security@memvid.com**
+### Response timeline
 
-Include the following in your report:
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact
-- Suggested fix (if any)
+- Acknowledgment within 48 hours.
+- Severity assessment and triage.
+- Critical issues addressed within 7 days.
+- Coordinated disclosure with credit (unless you prefer anonymity).
 
-### What to Expect
+## Scope
 
-- **Acknowledgment**: We will acknowledge your report within 48 hours
-- **Assessment**: We will assess the vulnerability and determine its severity
-- **Fix Timeline**: Critical vulnerabilities will be addressed within 7 days
-- **Disclosure**: We will coordinate with you on public disclosure timing
-- **Credit**: We will credit you in our security advisories (unless you prefer anonymity)
+In scope:
 
-### Scope
+- Path traversal in `--project` argument handling.
+- Data leakage from sealed shards or archives.
+- Tamper detection bypass in `--verify`.
+- Permission escalation through the installer.
+- Symlink races in the rotation path.
 
-The following are in scope:
-- Memory corruption vulnerabilities
-- Data leakage from `.mv2` files
-- Encryption bypass (when using `encryption` feature)
-- Denial of service attacks
-- Path traversal vulnerabilities
+Out of scope:
 
-### Safe Harbor
+- Tampering by an attacker with the same UID as the agent (the `chmod 0444` defense is for accidents, not for adversarial users sharing your account).
 
-We consider security research conducted in good faith to be authorized. We will not pursue legal action against researchers who:
-- Act in good faith
-- Avoid privacy violations
-- Do not access or modify other users' data
-- Report vulnerabilities promptly
-- Give us reasonable time to fix issues before disclosure
+## Security model
 
-## Security Best Practices
+Sealed shards are written with `chmod 0444` and rotated via atomic `rename(2)`. Each shard records the SHA-256 of the prior shard's full file (`prev-sha256`), forming a tamper-evident chain across the live rotation. `memvid-context --verify` recomputes the chain and the structural invariants (magic line, body byte count, end marker, no trailing bytes).
 
-When using Memvid:
+The archive is append-only by convention: rotated-out shards are compressed with `xz -9e`, set `chmod 0444`, and retained indefinitely. The system does not encrypt shards; if you need encrypted storage, encrypt the shards or state directory at a layer above (e.g., LUKS, encrypted home directory).
 
-1. **File Permissions**: Set appropriate file permissions on `.mv2` files
-2. **Encryption**: Use the `encryption` feature for sensitive data
-3. **Validation**: Validate input before ingesting into memory
-4. **Updates**: Keep Memvid updated to the latest version
+## Best practices
 
-## Security Features
-
-Memvid includes several security features:
-
-- **Checksums**: Blake3 checksums for data integrity
-- **Signatures**: Ed25519 signatures for authenticity
-- **Encryption**: Optional AES-256-GCM encryption (`.mv2e` capsules)
-- **Crash Safety**: WAL-based recovery prevents corruption
+- Run agents as a dedicated UID with write access only to the shards and archive directories.
+- Restrict the parent directory permissions if you do not want UID peers reading shards.
+- Validate `--project` arguments are constrained to `[A-Za-z0-9._-]+` (the tools enforce this; do not bypass it).
+- Keep `memvid-write` and `memvid-context` on the same release version as the format spec they were built against.

@@ -15,29 +15,36 @@ A clear and concise description of the bug.
 3.
 
 ## Expected Behavior
-What you expected to happen.
 
 ## Actual Behavior
-What actually happened.
 
 ## Environment
-- **OS**: [e.g., macOS 14.0, Ubuntu 22.04, Windows 11]
-- **Rust Version**: [e.g., 1.85.0]
-- **Memvid Version**: [e.g., 2.0.0]
-- **Features Enabled**: [e.g., lex, vec, clip]
+- **OS**: [e.g., Ubuntu 22.04, Arch, macOS 14]
+- **Shell**: `bash --version`
+- **coreutils**: `sha256sum --version | head -n1`
+- **Memvid version**: commit SHA or release tag
 
-## Minimal Reproducible Example
-```rust
-// Code to reproduce the issue
+## Shard header (if relevant)
+Paste the first seven lines of the affected shard (the header before `---BEGIN BODY---`). Redact `project:` and `agent:` if sensitive.
+
+```
+MV2 SHARD v3
+project: ...
+agent: ...
+ts: ...
+prev-sha256: ...
+body-sha256: ...
+body-bytes: ...
 ```
 
-## Error Output
+## Command + error output
 ```
-// Paste any error messages or stack traces here
+$ memvid-write ...
+<paste error here>
 ```
 
 ## Additional Context
-Any other context about the problem (screenshots, logs, etc.)
+Any other context (logs, file sizes, archive count, etc.).
 
 ## Checklist
 - [ ] I have searched existing issues for duplicates

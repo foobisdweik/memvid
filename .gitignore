@@ -1,53 +1,16 @@
-doc.mv2
-*.mv2
-*.mv2-wal
-*.mv2-shm
-*.mv2-lock
-*.mv2-journal
-*.mv2.*
-*.mv2-wal.*
-*.mv2-shm.*
-*.mv2-lock.*
-*.mv2-journal.*
-
 .DS_Store
 *.bk
-.idea
+.idea/
 
+# Local state directories (do not commit shards or archives)
+/var/
+shards/
+archive/
 
-/target
-/dist
-**/*.rs.bk
-# Cargo.lock - now committed for reproducible CI builds
-.idea
+# Editor swap files
+*.swp
+*.swo
+*~
 
-
-entry2.json
-entry1.txt
-vector_entry.txt
-vector_embedding.txt
-
-*.pdf
-*.txt
-# Exception: SymSpell dictionary files needed for PDF text cleanup
-!data/*.txt
-!crates/core/data/*.txt
-*.docx
-*.doc
-*.pptx
-*.ppt
-*.xlsx
-*.xls
-*.csv
-*.json
-
-models/
-.fastembed_cache/
-.firecrawl/
-*.DS_Store
-
-issue_overview.md
-
-feature_100x_memvid.md
-
-plan_model_robust.md
+# Test scratch
+/tmp/

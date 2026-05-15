@@ -1,40 +1,29 @@
 # Claude Instructions
 
-Follow `AGENTS.md`. Claude-specific durable memory is disabled for project facts, architecture, conventions, decisions, handoffs, and task state. Do not use native Claude memory tooling or caches for this repository. Write durable records only as atomic queue Markdown to `/var/lib/memvid/queue/`.
+Follow `AGENTS.md`. Native Claude memory (memory tooling, learned profiles, cross-session recall) is disabled for project facts, architecture, decisions, handoffs, and task state in this repository. The project shard is the only durable surface.
 
-Start sessions through installed `claude-memvid` wrapper or shell function when available. It loads `memvid-context` and librarian automatically at CLI startup. Treat injected startup context as read-only recall and do not access `.mv2` stores directly.
+Start sessions through the installed `claude-memvid` wrapper. It runs `memvid-context` automatically at CLI launch and injects the current shard. Treat injected startup context as read-only recall.
 
-Use `agent:claude` in queued headers.
-Use `[project:global]` only for explicit cross-project coordination. Ordinary workspace facts belong to current project shard.
+Use `agent: claude` in shard headers (the wrapper sets this for you).
 
-## Memvid Queue — Mandatory Checkpoints
+Use `--project global` only for explicit cross-project coordination. Ordinary workspace facts belong to the current project shard.
 
-Write a queue entry at each trigger below. No exceptions.
+## Write checkpoints
 
-**Write immediately when:**
-- [ ] User confirms a fix works on device or in tests
-- [ ] User explicitly identifies something as a bug (not you)
-- [ ] A decision is finalized — user accepted an approach or you committed code
-- [ ] A file, function, command, or protocol is created or renamed
-- [ ] A task the user assigned is complete
-- [ ] A test produces a concrete, unexpected result that changes direction
-- [ ] A hard blocker is hit: missing dependency, broken tool, auth failure, device rejection
+Write a full new shard via `memvid-write --project memvid --agent claude` at:
 
-**Write before stopping when:**
-- [ ] Session is ending or handing off to another agent
-- [ ] Context compaction is imminent
+- Task completion (the user assigned it; it is done).
+- A decision finalized (you committed code, or the user accepted an approach).
+- A file, function, command, or protocol created or renamed.
+- A hard blocker (missing dependency, broken tool, auth failure).
+- Session ending or compaction imminent.
 
-**Do NOT write for:**
-- Speculation, hypotheses, or your own suspicions about the code
-- Behavior you infer without a failing test or user report to back it
-- Intermediate steps within a single task
-- Explanations or plans that haven't been acted on
+Do not write for: speculation, intermediate steps within a single task, hypotheses without evidence, plans you have not acted on.
 
-One entry per logical unit. Do not batch unrelated facts.
-Prefer the helper when available:
+Rewrite the **full** shard each time. Do not append. The writer rotates the prior shard into `.1` automatically. Prune stale handoffs at write time; preserve specifics (paths, exact commands, error strings, dates).
 
 ```bash
-memvid-queue-write --agent claude --project <project> --status done --type update <<'EOF'
-<concise durable update>
+memvid-write --project memvid --agent claude <<'EOF'
+<full new shard body>
 EOF
 ```

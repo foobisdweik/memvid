@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# memvid-write: seal a new project shard, rotate prior shards, archive evicted shard.
+#
+# Format: MV2 v3 sealed shard. Plain text. See MV2_SPEC.md.
+# Atomicity: write to temp, fsync (best effort), rename, chmod 0444.
+# Rotation: current -> .1 -> .2; evicted .2 is xz -9e archived under the project.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  memvid-write --project NAME [--agent NAME] [--force] < body.md
+
+Reads the full new shard body from stdin, seals it as a new .mv2 file, rotates
+existing shards (current -> .1 -> .2), and archives the evicted .2 into
+<archive>/<project>/. The current shard file is made read-only (0444).
+
+Options:
+  --project NAME   Project name. Use 'global' for cross-project shard.
+  --agent NAME     Agent identifier in shard header. Default: $MEMVID_AGENT or 'agent'.
+  --force          Skip shrinkage safety check (reject new body < 25% of current).
+  -h, --help       Show this help.
+
+Environment:
+  MEMVID_CONFIG       Settings file. Default: /etc/memvid/settings.toml.
+  MEMVID_SHARDS_DIR   Override shards directory.
+  MEMVID_ARCHIVE_DIR  Override archive directory.
+  MEMVID_AGENT        Default agent name.
+EOF
+}
+
+settings_path="${MEMVID_CONFIG:-/etc/memvid/settings.toml}"
+shards_dir="${MEMVID_SHARDS_DIR:-}"
+archive_dir="${MEMVID_ARCHIVE_DIR:-}"
+agent="${MEMVID_AGENT:-agent}"
+project=""
+force=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) project="${2:?--project requires a value}"; shift 2 ;;
+    --agent)   agent="${2:?--agent requires a value}"; shift 2 ;;
+    --force)   force=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "memvid-write: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$project" ]]; then
+  echo "memvid-write: --project is required" >&2
+  exit 2
+fi
+if [[ ! "$project" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "memvid-write: invalid project name (use [A-Za-z0-9._-])" >&2
+  exit 2
+fi
+
+read_setting() {
+  local key="$1" file="$2"
+  awk -F'=' -v k="$key" '
+    /^[[:space:]]*\[/ { in_paths = ($0 ~ /^[[:space:]]*\[paths\][[:space:]]*$/); next }
+    in_paths && $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
+      v = $2
+      sub(/[[:space:]]*#.*/, "", v)
+      gsub(/"/, "", v)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      print v; exit
+    }
+  ' "$file"
+}
+
+if [[ -z "$shards_dir" ]]; then
+  if [[ -f "$settings_path" ]]; then
+    shards_dir="$(read_setting shards "$settings_path")"
+  fi
+  shards_dir="${shards_dir:-/var/lib/memvid/shards}"
+fi
+if [[ -z "$archive_dir" ]]; then
+  if [[ -f "$settings_path" ]]; then
+    archive_dir="$(read_setting archive "$settings_path")"
+  fi
+  archive_dir="${archive_dir:-/var/lib/memvid/archive}"
+fi
+
+mkdir -p "$shards_dir" "$archive_dir/$project"
+
+body_tmp="$(mktemp "${TMPDIR:-/tmp}/memvid-write-body.XXXXXXXX")"
+shard_tmp=""
+cleanup() { rm -f "$body_tmp" "${shard_tmp:-}"; }
+trap cleanup EXIT
+
+cat > "$body_tmp"
+
+body_bytes="$(wc -c < "$body_tmp")"
+if [[ "$body_bytes" -eq 0 ]]; then
+  echo "memvid-write: refusing to write empty body" >&2
+  exit 1
+fi
+
+body_sha="$(sha256sum < "$body_tmp" | awk '{print $1}')"
+
+current="$shards_dir/$project.mv2"
+prev1="$shards_dir/$project.mv2.1"
+prev2="$shards_dir/$project.mv2.2"
+
+prev_sha="none"
+if [[ -f "$current" ]]; then
+  prev_sha="$(sha256sum < "$current" | awk '{print $1}')"
+fi
+
+if [[ "$force" -eq 0 && -f "$current" ]]; then
+  current_body_bytes="$(awk -F': ' '/^body-bytes:/{print $2; exit}' "$current" 2>/dev/null || echo 0)"
+  current_body_bytes="${current_body_bytes:-0}"
+  threshold=$(( current_body_bytes / 4 ))
+  if [[ "$current_body_bytes" -gt 256 && "$body_bytes" -lt "$threshold" ]]; then
+    echo "memvid-write: refusing write: new body ($body_bytes bytes) < 25% of prior body ($current_body_bytes bytes); pass --force to override" >&2
+    exit 1
+  fi
+fi
+
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+shard_tmp="$(mktemp "${shards_dir}/.write.${project}.XXXXXXXX.tmp")"
+
+{
+  printf 'MV2 SHARD v3\n'
+  printf 'project: %s\n' "$project"
+  printf 'agent: %s\n' "$agent"
+  printf 'ts: %s\n' "$ts"
+  printf 'prev-sha256: %s\n' "$prev_sha"
+  printf 'body-sha256: %s\n' "$body_sha"
+  printf 'body-bytes: %s\n' "$body_bytes"
+  printf -- '---BEGIN BODY---\n'
+  cat "$body_tmp"
+  printf '\n---END BODY---\n'
+} > "$shard_tmp"
+
+sync "$shard_tmp" 2>/dev/null || true
+chmod 0444 "$shard_tmp"
+
+if [[ -f "$prev2" ]]; then
+  archive_ts="$(awk -F': ' '/^ts:/{print $2; exit}' "$prev2" 2>/dev/null || true)"
+  archive_ts="${archive_ts:-$ts}"
+  archive_ts="${archive_ts//:/_}"
+  archive_hash="$(sha256sum < "$prev2" | awk '{print $1}')"
+  archive_short="${archive_hash:0:8}"
+  archive_dest="$archive_dir/$project/${archive_ts}-${archive_short}.mv2.xz"
+  if [[ -e "$archive_dest" ]]; then
+    archive_dest="$archive_dir/$project/${archive_ts}-${archive_short}-$(date +%s%N).mv2.xz"
+  fi
+  xz -9e -c "$prev2" > "$archive_dest"
+  chmod 0444 "$archive_dest"
+  rm -f "$prev2"
+fi
+
+if [[ -f "$prev1" ]]; then
+  mv "$prev1" "$prev2"
+fi
+
+if [[ -f "$current" ]]; then
+  mv "$current" "$prev1"
+fi
+
+mv "$shard_tmp" "$current"
+chmod 0444 "$current"
+shard_tmp=""
+
+sync "$shards_dir" 2>/dev/null || true
+
+printf '%s\n' "$current"

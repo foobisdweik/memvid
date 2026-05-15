@@ -1,159 +1,62 @@
 # Contributing to Memvid
 
-Thank you for your interest in contributing to Memvid! We welcome contributions from everyone.
+Contributions welcome. Memvid is now a small set of bash tools plus a documented shard format. Keep changes minimal and aligned with the design in `MV2_SPEC.md` and `AGENTS.md`.
 
-## Getting Started
+## Setup
 
-### Prerequisites
-
-- **Rust 1.85.0+** — Install from [rustup.rs](https://rustup.rs)
-- **Git** — For version control
-
-### Setup
-
-1. **Fork the repository** on GitHub
-
-2. **Clone your fork**:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/memvid.git
-   cd memvid
-   ```
-
-3. **Build the project**:
-   ```bash
-   cargo build
-   ```
-
-4. **Run tests**:
-   ```bash
-   cargo test
-   ```
-
-## Development Workflow
-
-### Creating a Branch
+Prerequisites: `bash`, GNU coreutils (`sha256sum`, `head`, `tail`, `mktemp`), `awk`, `xz`, `grep`, `sed`. For development you also want `shellcheck` and `make`.
 
 ```bash
-git checkout -b feature/your-feature-name
-# or
-git checkout -b fix/your-bug-fix
+git clone https://github.com/foobisdweik/memvid.git
+cd memvid
+make test
 ```
 
-### Making Changes
+## Development workflow
 
-1. Write your code following the [code style guidelines](#code-style)
-2. Add tests for new functionality
-3. Ensure all tests pass: `cargo test`
-4. Run clippy: `cargo clippy`
-5. Format code: `cargo fmt`
-
-### Committing
-
-Write clear, concise commit messages:
-
-```bash
-git commit -m "feat: add support for XYZ"
-git commit -m "fix: resolve issue with ABC"
-git commit -m "docs: update README examples"
-```
-
-### Submitting a Pull Request
-
-1. Push to your fork:
+1. Branch from `main`: `git checkout -b feature/<short-name>` or `fix/<short-name>`.
+2. Edit. Keep tools self-contained and POSIX-friendly where reasonable.
+3. Lint and test:
    ```bash
-   git push origin feature/your-feature-name
+   make lint
+   make test
    ```
+4. Commit with a concise imperative subject (`fix:`, `docs:`, `feat:`).
+5. Open a PR. CI runs `make lint` and `make test`.
 
-2. Open a Pull Request on GitHub
+## Shell style
 
-3. Fill out the PR template completely
+- Shebang: `#!/usr/bin/env bash`.
+- First line of body: `set -euo pipefail`.
+- Quote variables (`"$var"`) and use `[[ ]]` for tests.
+- No silent failures. Print to stderr with a script-name prefix on error paths.
+- Prefer GNU coreutils and standard Unix tools. No Python, Rust, or external runtime dependencies for the tools.
 
-4. Wait for review and address feedback
+## Adding a test
 
-## Code Style
+Tests live in `tests/test_*.sh`. Each script is invoked from `make test`. A test:
 
-### Rust Guidelines
+- Creates its own `mktemp -d` scratch dir.
+- Exports `MEMVID_SHARDS_DIR` and `MEMVID_ARCHIVE_DIR` to isolate state.
+- Uses the helpers `fail`/`pass`/`assert_eq` already established in the existing tests.
+- Cleans up via `trap`.
 
-- Follow standard Rust idioms and conventions
-- Use `rustfmt` for formatting (`cargo fmt`)
-- Use `clippy` for linting (`cargo clippy`). We maintain a **zero-warning policy**.
-- Prefer explicit types for public APIs
-- Use `thiserror` for error definitions
+## Format changes
 
-### Linting & Safety
+The MV2 v3 shard format is defined in `MV2_SPEC.md`. Format changes must:
 
-We enforce strict linting to ensure safety and portability:
+1. Update `MV2_SPEC.md` first.
+2. Update `memvid-write` (serializer) and `memvid-context` (parser, verifier).
+3. Add a regression test in `tests/test_shard_lifecycle.sh`.
+4. Document the format version bump in `CHANGELOG.md`.
 
-1.  **Zero Warnings**: CI will fail on any warning. Run `cargo clippy --workspace --all-targets -- -D warnings` locally.
-2.  **No Panics**: `unwrap()` and `expect()` are **denied** in library code. Use `Result` propagation (`?`) or graceful error handling. They are allowed in `tests/`.
-3.  **No Truncation**: `cast_possible_truncation` is denied. Use `try_from` when converting `u64` to `usize`/`u32`.
-4.  **Exceptions**: We allow pragmatic lints (e.g., `cast_precision_loss` for ML math) in `src/lib.rs`. Do not add global `#![allow]` without discussion.
+## Reporting bugs
 
-### Documentation
+Include in the report:
 
-- Add doc comments (`///`) to all public functions, structs, and modules
-- Include examples in doc comments where helpful
-- Keep comments concise and up-to-date
+- Shell version (`bash --version`), OS, coreutils version.
+- The `.mv2` file involved (if not sensitive) or its `head -n7` header lines.
+- Reproduction steps.
+- Expected vs actual behavior.
 
-### Testing
-
-- Write unit tests for new functionality
-- Place tests in the same file using `#[cfg(test)]` module
-- Integration tests go in the `tests/` directory
-- Aim for high coverage of edge cases
-
-## Project Structure
-
-```
-memvid/
-├── src/              # Source code
-│   ├── lib.rs        # Public API
-│   ├── memvid/       # Core implementation
-│   ├── io/           # File I/O
-│   └── types/        # Type definitions
-├── tests/            # Integration tests
-├── examples/         # Example code
-├── benchmarks/       # Benchmarks
-└── data/             # Required data files
-```
-
-## Feature Flags
-
-When adding new functionality, consider if it should be behind a feature flag:
-
-```toml
-[features]
-my_feature = ["dep:some-dependency"]
-```
-
-This keeps the default build lean and fast.
-
-## Reporting Issues
-
-When reporting bugs, please include:
-
-- Rust version (`rustc --version`)
-- Operating system
-- Memvid version
-- Minimal code to reproduce
-- Expected vs actual behavior
-
-## Translations
-
-Interested in translating Memvid's documentation? See [Contributing Translations](docs/i18n/CONTRIBUTING_TRANSLATIONS.md) for guidelines on translating the README and other documentation.
-
-## Getting Help
-
-- Open a [Discussion](https://github.com/memvid/memvid/discussions) for questions
-- Check existing [Issues](https://github.com/memvid/memvid/issues) for similar problems
-- Email: contact@memvid.com
-
-## Recognition
-
-Contributors are:
-- Listed in release notes
-- Part of the Memvid community
-
----
-
-**Thank you for making Memvid better!**
+Open an issue at https://github.com/foobisdweik/memvid/issues.

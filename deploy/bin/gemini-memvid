@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gemini-memvid: launch the real `gemini` CLI with the current project shard injected.
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,8 +12,7 @@ if [[ ! -x "$context_bin" ]]; then
 fi
 
 find_agent() {
-  local name="$1"
-  local candidate resolved wrapper
+  local name="$1" candidate resolved wrapper
   local -a path_dirs
   local IFS=:
   wrapper="$(realpath -m "$script_dir/$name-memvid" 2>/dev/null || printf '%s/%s-memvid' "$script_dir" "$name")"
@@ -37,31 +37,18 @@ if [[ -z "$agent_bin" ]]; then
   }
 fi
 
-context_err="$(mktemp "${TMPDIR:-/tmp}/memvid-context-gemini.XXXXXX")"
-if ! context="$(MEMVID_AGENT=gemini "$context_bin" --agent gemini 2>"$context_err")"; then
-  context="# Memvid Startup Context
+project="${MEMVID_PROJECT:-$(basename -- "$PWD")}"
+context="$(MEMVID_AGENT=gemini "$context_bin" --project "$project" 2>/dev/null)" || context="# Memvid Startup Context
 
-- agent: \`gemini\`
-- librarian: \`fallback\`
-- warning: \`memvid-context failed; launching agent without recalled memory\`
-
-## Operating Rules
-
-Do not use agent-native memory tools, memory caches, learned profiles, or cross-session recall for project facts, architecture, conventions, decisions, handoffs, or task state. Durable memory writes go only through atomic Markdown files in \`/var/lib/memvid/queue\`.
-
-## memvid-context stderr
-
-\`\`\`text
-$(sed -n '1,20p' "$context_err")
-\`\`\`"
-fi
-rm -f "$context_err"
+- project: \`$project\`
+- shard: \`unavailable\`
+- note: memvid-context failed; launching agent without recalled context."
 
 if [[ "$#" -eq 0 ]]; then
-  exec "$agent_bin" --prompt-interactive "$context"
+  exec "$agent_bin" "$context"
 fi
 
-gemini_args=()
+agent_args=()
 prompt_parts=()
 seen_separator=0
 for arg in "$@"; do
@@ -70,7 +57,7 @@ for arg in "$@"; do
     continue
   fi
   if [[ "$seen_separator" -eq 0 ]]; then
-    gemini_args+=("$arg")
+    agent_args+=("$arg")
   else
     prompt_parts+=("$arg")
   fi
@@ -78,14 +65,14 @@ done
 
 if [[ "$seen_separator" -eq 0 ]]; then
   prompt="$*"
-  exec "$agent_bin" --prompt-interactive "$context
+  exec "$agent_bin" "$context
 
 User request:
 $prompt"
 fi
 
 prompt="${prompt_parts[*]}"
-exec "$agent_bin" "${gemini_args[@]}" --prompt-interactive "$context
+exec "$agent_bin" "${agent_args[@]}" "$context
 
 User request:
 $prompt"

@@ -1,226 +1,108 @@
-# MV2 File Format Specification
+# MV2 Sealed Shard Specification
 
-Version 2.1
+Version 3.0
 
-## Overview
+## Purpose
 
-MV2 is a single-file format for AI memory storage. Everything lives in one file: header, write-ahead log, data segments, search indices, and metadata. No sidecar files.
+A `.mv2` file is a sealed, tamper-evident, single-shard memory container for one project. It exists to give a coding agent a durable record of project context that cannot be silently rewritten, and that can be verified against a short chain of prior shards.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        .mv2 FILE                            │
-├─────────────────────────────────────────────────────────────┤
-│ Header                 │ 4 KB                               │
-├─────────────────────────────────────────────────────────────┤
-│ Embedded WAL           │ 1-64 MB (capacity-dependent)       │
-├─────────────────────────────────────────────────────────────┤
-│ Data Segments          │ Variable                           │
-│   - Frame payloads                                          │
-│   - Compressed content                                      │
-├─────────────────────────────────────────────────────────────┤
-│ Lex Index Segment      │ Tantivy index (optional)           │
-├─────────────────────────────────────────────────────────────┤
-│ Vec Index Segment      │ HNSW vectors (optional)            │
-├─────────────────────────────────────────────────────────────┤
-│ Time Index Segment     │ Chronological ordering             │
-├─────────────────────────────────────────────────────────────┤
-│ TOC (Footer)           │ Segment catalog + checksums        │
-└─────────────────────────────────────────────────────────────┘
-```
+Rotation policy is fixed at three live shards on disk (`current`, `.1`, `.2`). The shard evicted from `.2` is compressed with `xz -9e` and retained in the per-project archive directory indefinitely. The archive is for emergency recovery; routine reads only touch the three live shards.
 
-## Header (4096 bytes)
+A v3 shard is plain UTF-8 text: a small line-oriented header followed by a fixed body framing. No embeddings, no indices, no WAL. Everything in the file is human-readable.
 
-The header occupies the first 4 KB of the file.
-
-| Offset | Size | Field | Description |
-|--------|------|-------|-------------|
-| 0 | 4 | `magic` | `MV2\0` (0x4D 0x56 0x32 0x00) |
-| 4 | 2 | `version` | Format version (little-endian) |
-| 6 | 1 | `spec_major` | Spec major version (2) |
-| 7 | 1 | `spec_minor` | Spec minor version (1) |
-| 8 | 8 | `footer_offset` | Byte offset to TOC |
-| 16 | 8 | `wal_offset` | Byte offset to WAL (always 4096) |
-| 24 | 8 | `wal_size` | WAL region size in bytes |
-| 32 | 8 | `wal_checkpoint_pos` | Last checkpointed sequence |
-| 40 | 8 | `wal_sequence` | Current WAL sequence number |
-| 48 | 32 | `toc_checksum` | SHA-256 of TOC segment |
-| 80 | 4016 | reserved | Zero-filled, reserved for future use |
-
-All multi-byte integers are little-endian.
-
-## Write-Ahead Log (WAL)
-
-The embedded WAL provides crash recovery. It starts at byte 4096 and has a capacity determined by the file's target size:
-
-| File Capacity | WAL Size |
-|---------------|----------|
-| < 100 MB | 1 MB |
-| < 1 GB | 4 MB |
-| < 10 GB | 16 MB |
-| >= 10 GB | 64 MB |
-
-### WAL Entry Format
+## File layout
 
 ```
-┌──────────────────────────────────────┐
-│ sequence    │ 8 bytes (u64 LE)       │
-│ entry_type  │ 1 byte                 │
-│ payload_len │ 4 bytes (u32 LE)       │
-│ payload     │ variable               │
-│ checksum    │ 4 bytes (CRC32)        │
-└──────────────────────────────────────┘
+<header line: magic + version>
+<header line: project>
+<header line: agent>
+<header line: ts>
+<header line: prev-sha256>
+<header line: body-sha256>
+<header line: body-bytes>
+---BEGIN BODY---
+<exactly body-bytes bytes of body>
+\n
+---END BODY---
+\n
 ```
 
-Entry types:
-- `0x01` - Frame append
-- `0x02` - Frame update
-- `0x03` - Frame delete (tombstone)
-- `0x04` - Index update
+Each header line ends with a single `\n`. The body is exactly `body-bytes` bytes verbatim — it may contain any bytes including newlines and is not interpreted. After the body, the writer emits a single separator `\n`, then the literal line `---END BODY---\n`, and the file ends.
 
-### Checkpoint Behavior
-
-- Checkpoint triggers at 75% WAL occupancy or every 1,000 transactions
-- Checkpoint flushes WAL entries to data segments
-- `seal()` forces immediate checkpoint
-- Recovery replays entries with `sequence > wal_checkpoint_pos`
-
-## Frame Structure
-
-Each frame represents a single piece of content.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `frame_id` | u64 | Unique identifier (monotonic) |
-| `uri` | String | Hierarchical path (`mv2://path/to/doc`) |
-| `title` | String? | Optional display title |
-| `created_at` | u64 | Unix timestamp (seconds) |
-| `encoding` | u8 | Content encoding (see below) |
-| `payload` | bytes | Compressed content |
-| `payload_checksum` | [u8; 32] | SHA-256 of uncompressed payload |
-| `tags` | Map<String, String> | User-defined key-value pairs |
-| `status` | u8 | 0=active, 1=tombstoned |
-
-### Encoding Types
-
-| Value | Name | Description |
-|-------|------|-------------|
-| 0 | Raw | Uncompressed bytes |
-| 1 | Zstd | Zstandard compression |
-| 2 | Lz4 | LZ4 compression |
-
-## Data Segments
-
-Frames are grouped into segments for efficient storage and retrieval.
-
-### Segment Header
+Total file size is therefore exactly:
 
 ```
-┌──────────────────────────────────────┐
-│ magic         │ 4 bytes              │
-│ version       │ 2 bytes              │
-│ segment_type  │ 1 byte               │
-│ frame_count   │ 4 bytes              │
-│ compressed    │ 1 byte (bool)        │
-│ checksum      │ 32 bytes             │
-└──────────────────────────────────────┘
+header_bytes + len("---BEGIN BODY---\n") + body-bytes + 16
 ```
 
-Segment types:
-- `0x01` - Data segment (frames)
-- `0x02` - Lex index segment
-- `0x03` - Vec index segment
-- `0x04` - Time index segment
+Where 16 is `len("\n---END BODY---\n")`.
 
-## Time Index
+## Header fields
 
-The time index enables chronological queries and time-travel.
+All header fields are mandatory and appear in the following order:
 
-### Time Index Entry
+| Line | Format | Description |
+|------|--------|-------------|
+| 1 | `MV2 SHARD v3` | Magic line. Identifies format and major version. |
+| 2 | `project: <name>` | Project name. Pattern: `[A-Za-z0-9._-]+`. The reserved name `global` is for cross-project shards. |
+| 3 | `agent: <name>` | Identifier of the agent that authored this shard. |
+| 4 | `ts: <iso8601-utc>` | Write timestamp in `YYYY-MM-DDThh:mm:ssZ` form. |
+| 5 | `prev-sha256: <hex|none>` | SHA-256 of the entire prior `current` file (the file that will become `.1` after this write), or the literal `none` for the first shard ever written for this project. |
+| 6 | `body-sha256: <hex>` | SHA-256 of the `body-bytes` bytes of the body. |
+| 7 | `body-bytes: <integer>` | Byte length of the body, decimal, no leading zeros. |
 
-| Field | Size | Description |
-|-------|------|-------------|
-| `frame_id` | 8 | Frame identifier |
-| `timestamp` | 8 | Unix timestamp |
-| `offset` | 8 | Byte offset in data segment |
+Hex hashes are 64 lowercase hex characters.
 
-Magic: `MVTI` (0x4D 0x56 0x54 0x49)
+## Hash chain
 
-## Lex Index (Full-Text Search)
+Each shard authenticates the prior shard's *entire file contents* via `prev-sha256`. After rotation:
 
-When the `lex` feature is enabled, the file contains a Tantivy index segment.
+- `current.prev-sha256 == sha256(<current_.1_file>)`
+- `.1.prev-sha256 == sha256(<current_.2_file>)`
+- `.2.prev-sha256` references a shard that has either been archived or was the project's first shard. `--verify` does not enforce `.2`'s chain link, since the predecessor is no longer in the live rotation.
 
-Indexed fields:
-- `body` - Full text content
-- `title` - Document title
-- `uri` - Document URI
-- `tags` - Flattened tag values
+A tamper in `.2` would change its file hash, so `.1`'s `prev-sha256` would no longer match. A tamper in `.1` likewise breaks `current.prev-sha256`. A tamper in `current` is detected only by its own internal hashes (`body-sha256` and structural invariants), since there is no successor. The primary defense for `current` is the filesystem-enforced `0444` mode.
 
-Supports:
-- BM25 ranking
-- Phrase queries
-- Boolean operators
-- Date range filters
+## Immutability
 
-## Vec Index (Vector Search)
+After a successful write, the shard file is `chmod 0444`. Routine writers and agents cannot accidentally overwrite it. A user with write permission on the containing directory can still replace it via rotation (because `rename(2)` only needs write permission on the parent), but that path is the supported one and produces a new sealed file with a fresh hash chain link.
 
-When the `vec` feature is enabled, the file contains an HNSW index segment.
+## Rotation contract (writer)
 
-| Parameter | Value |
-|-----------|-------|
-| Dimensions | 384 (BGE-small) |
-| Distance | Cosine similarity |
-| M | 16 |
-| ef_construction | 200 |
+A writer must, on each successful seal:
 
-## Table of Contents (TOC)
+1. Build the new shard file as a temp file in the shards directory.
+2. `fsync` (best effort) and `chmod 0444` the temp file.
+3. If `.2` exists: `xz -9e` it into the per-project archive directory, then remove `.2`.
+4. If `.1` exists: rename `.1` → `.2`.
+5. If `current` exists: rename `current` → `.1`.
+6. Rename the temp file → `current`.
 
-The TOC is the final segment, pointed to by `footer_offset` in the header.
+All renames are atomic on local filesystems. Failure between steps 4 and 6 leaves the project in a recoverable state (no `current` file, but `.1` carries the immediately prior content).
+
+## Archive
+
+The per-project archive directory contains `xz -9e` compressed copies of every shard ever evicted from the `.2` slot. Filenames are:
 
 ```
-┌──────────────────────────────────────┐
-│ magic         │ "MVTC"               │
-│ version       │ 2 bytes              │
-│ segment_count │ 4 bytes              │
-│ segments[]    │ SegmentDescriptor[]  │
-│ manifests     │ IndexManifests       │
-│ checksum      │ 32 bytes             │
-└──────────────────────────────────────┘
+<sanitized-ts>-<first-8-hex-of-file-sha256>.mv2.xz
 ```
 
-### Segment Descriptor
+Where `<sanitized-ts>` is the shard's own `ts:` header with `:` replaced by `_`. The archive directory grows monotonically; nothing is pruned.
 
-| Field | Size | Description |
-|-------|------|-------------|
-| `segment_type` | 1 | Type identifier |
-| `offset` | 8 | Byte offset in file |
-| `length` | 8 | Segment size in bytes |
-| `checksum` | 32 | SHA-256 of segment |
+## Verification
 
-## URI Scheme
+A verifier should, for each of `current`, `.1`, `.2`:
 
-All content is addressable via `mv2://` URIs:
+1. Confirm the file begins with `MV2 SHARD v3\n`.
+2. Parse the header lines.
+3. Locate `---BEGIN BODY---\n`, extract exactly `body-bytes` bytes immediately following it, and confirm `sha256(body) == body-sha256`.
+4. Confirm the total file size equals `header_offset_of_BEGIN_marker + 17 + body-bytes + 16`.
+5. Confirm the last 15 bytes of the file are `---END BODY---\n`.
+6. For the hash chain, recompute `sha256(prior_file)` and compare against the successor's `prev-sha256`. `current` chains to `.1`; `.1` chains to `.2`. `.2`'s chain link is not verified against a live predecessor.
 
-```
-mv2://[track/][path/]name
-```
+## Why this is enough
 
-Examples:
-- `mv2://meetings/2024-01-15`
-- `mv2://docs/api/reference.md`
-- `mv2://media/photo.png`
+Single-agent project ownership rules out concurrent-writer races. The rotation gives one tamper-evident predecessor chain and a fully retained archive for emergency reconstruction. Self-pruning at write time is the agent's responsibility, and the shrinkage safeguard in the writer (refuse new body smaller than 25% of prior body without `--force`) catches the most common accidental-truncation failure mode.
 
-## Invariants
-
-1. **Single-file guarantee**: No `.wal`, `.shm`, `.lock`, or other sidecar files
-2. **Append-only frames**: Existing frames are never modified in place
-3. **Determinism**: Same API calls produce identical bytes
-4. **Crash safety**: WAL ensures durability across unexpected termination
-5. **Self-describing**: TOC contains all metadata needed to parse the file
-
-## Version History
-
-| Version | Changes |
-|---------|---------|
-| 2.1 | Current version. Embedded WAL, temporal track support |
-| 2.0 | Single-file format, removed external indices |
-| 1.x | Legacy format (deprecated) |
+Nothing in this format requires a database, an index, or an embedding. The file is grep-able, diff-able, and recoverable with standard Unix tools.

@@ -9,8 +9,8 @@ Fixes #(issue number)
 - [ ] New feature (non-breaking change that adds functionality)
 - [ ] Breaking change (fix or feature that would cause existing functionality to change)
 - [ ] Documentation update
-- [ ] Performance improvement
-- [ ] Code refactoring (no functional changes)
+- [ ] Refactor / cleanup
+- [ ] Format change (requires `MV2_SPEC.md` and version bump)
 
 ## Changes Made
 -
@@ -18,25 +18,15 @@ Fixes #(issue number)
 -
 
 ## Testing
-- [ ] I have added tests that prove my fix/feature works
-- [ ] All existing tests pass (`cargo test`)
-- [ ] I have tested on my local machine
+- [ ] `make test` passes locally
+- [ ] `make lint` passes locally
+- [ ] Added or updated tests under `tests/test_*.sh` if behavior changed
 
 ## Documentation
-- [ ] I have updated relevant documentation
-- [ ] I have added doc comments for new public APIs
-- [ ] CHANGELOG.md has been updated (if applicable)
-
-## Checklist
-- [ ] My code follows the project's style guidelines
-- [ ] I have performed a self-review of my code
-- [ ] I have commented my code where necessary
-- [ ] My changes generate no new warnings
-- [ ] I have run `cargo clippy` and addressed any issues
-- [ ] I have run `cargo fmt` to format my code
-
-## Screenshots (if applicable)
-Add screenshots to help explain your changes.
+- [ ] Updated `MV2_SPEC.md` (if format changed)
+- [ ] Updated `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` (if agent contract changed)
+- [ ] Updated `docs/memvid-write.md` / `docs/memvid-context.md` (if tool surface changed)
+- [ ] `CHANGELOG.md` updated
 
 ## Additional Notes
 Any additional information reviewers should know.

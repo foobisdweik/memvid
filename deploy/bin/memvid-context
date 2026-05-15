@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# memvid-context: read the current project shard (or rotated backups, or archive).
+#
+# Default: prints the body of the current shard.
+# See MV2_SPEC.md for shard format.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  memvid-context [--project NAME] [--full|--verify|--history|--raw]
+
+Default mode prints the body of the current shard.
+
+Options:
+  --project NAME   Project name. Default: $MEMVID_PROJECT, else basename of $PWD.
+  --full           Print bodies of all three rotated shards (current, .1, .2).
+  --verify         Recompute hashes for all extant shards; exit nonzero on mismatch.
+  --history        List archived shards for the project (timestamp, short hash, bytes).
+  --raw            Print the full sealed file(s) verbatim (header + body framing).
+  -h, --help       Show this help.
+
+Environment:
+  MEMVID_CONFIG       Settings file. Default: /etc/memvid/settings.toml.
+  MEMVID_SHARDS_DIR   Override shards directory.
+  MEMVID_ARCHIVE_DIR  Override archive directory.
+  MEMVID_PROJECT      Default project name.
+EOF
+}
+
+mode=body
+project="${MEMVID_PROJECT:-}"
+settings_path="${MEMVID_CONFIG:-/etc/memvid/settings.toml}"
+shards_dir="${MEMVID_SHARDS_DIR:-}"
+archive_dir="${MEMVID_ARCHIVE_DIR:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) project="${2:?--project requires a value}"; shift 2 ;;
+    --full)    mode=full; shift ;;
+    --verify)  mode=verify; shift ;;
+    --history) mode=history; shift ;;
+    --raw)     mode=raw; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "memvid-context: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$project" ]]; then
+  project="$(basename -- "$PWD")"
+fi
+if [[ ! "$project" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "memvid-context: invalid project name (use [A-Za-z0-9._-])" >&2
+  exit 2
+fi
+
+read_setting() {
+  local key="$1" file="$2"
+  awk -F'=' -v k="$key" '
+    /^[[:space:]]*\[/ { in_paths = ($0 ~ /^[[:space:]]*\[paths\][[:space:]]*$/); next }
+    in_paths && $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
+      v = $2; sub(/[[:space:]]*#.*/, "", v); gsub(/"/, "", v); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      print v; exit
+    }
+  ' "$file"
+}
+
+if [[ -z "$shards_dir" ]]; then
+  if [[ -f "$settings_path" ]]; then
+    shards_dir="$(read_setting shards "$settings_path")"
+  fi
+  shards_dir="${shards_dir:-/var/lib/memvid/shards}"
+fi
+if [[ -z "$archive_dir" ]]; then
+  if [[ -f "$settings_path" ]]; then
+    archive_dir="$(read_setting archive "$settings_path")"
+  fi
+  archive_dir="${archive_dir:-/var/lib/memvid/archive}"
+fi
+
+current="$shards_dir/$project.mv2"
+prev1="$shards_dir/$project.mv2.1"
+prev2="$shards_dir/$project.mv2.2"
+
+shard_header() {
+  local shard="$1" key="$2"
+  awk -F': ' -v k="$key" '
+    /^---BEGIN BODY---/ { exit }
+    $1 == k { sub(/^[^:]*: /, ""); print; exit }
+  ' "$shard"
+}
+
+shard_body() {
+  local shard="$1" nbytes match offset body_start
+  nbytes="$(shard_header "$shard" body-bytes)"
+  if [[ -z "$nbytes" ]]; then
+    echo "memvid-context: missing body-bytes in $shard" >&2
+    return 1
+  fi
+  match="$(grep -bom1 -F -- '---BEGIN BODY---' "$shard" || true)"
+  if [[ -z "$match" ]]; then
+    echo "memvid-context: malformed shard (no BEGIN marker): $shard" >&2
+    return 1
+  fi
+  offset="${match%%:*}"
+  body_start=$(( offset + 17 ))
+  tail -c "+$((body_start + 1))" "$shard" | head -c "$nbytes"
+}
+
+verify_shard() {
+  local shard="$1" expected_prev="$2" label="$3"
+  local declared_body_sha computed_body_sha declared_prev_sha declared_body_bytes match offset body_start expected_end actual_size
+  if [[ ! -f "$shard" ]]; then
+    printf '%s: missing\n' "$label"
+    return 0
+  fi
+  local first_line
+  first_line="$(head -n1 "$shard")"
+  if [[ "$first_line" != "MV2 SHARD v3" ]]; then
+    printf '%s: FAIL bad magic: %q\n' "$label" "$first_line"
+    return 1
+  fi
+  declared_body_sha="$(shard_header "$shard" body-sha256)"
+  declared_prev_sha="$(shard_header "$shard" prev-sha256)"
+  declared_body_bytes="$(shard_header "$shard" body-bytes)"
+  computed_body_sha="$(shard_body "$shard" | sha256sum | awk '{print $1}')"
+  if [[ "$declared_body_sha" != "$computed_body_sha" ]]; then
+    printf '%s: FAIL body hash mismatch (declared %s, got %s)\n' "$label" "$declared_body_sha" "$computed_body_sha"
+    return 1
+  fi
+  if [[ "$declared_prev_sha" != "$expected_prev" ]]; then
+    printf '%s: FAIL prev-sha mismatch (declared %s, expected %s)\n' "$label" "$declared_prev_sha" "$expected_prev"
+    return 1
+  fi
+  # Structural tail check: file must end exactly at "<body><newline>---END BODY---<newline>"
+  match="$(grep -bom1 -F -- '---BEGIN BODY---' "$shard" || true)"
+  offset="${match%%:*}"
+  body_start=$(( offset + 17 ))
+  # After body, expect "\n---END BODY---\n" (16 bytes)
+  expected_end=$(( body_start + declared_body_bytes + 16 ))
+  actual_size="$(wc -c < "$shard")"
+  if [[ "$actual_size" -ne "$expected_end" ]]; then
+    printf '%s: FAIL trailing bytes (file %s, expected %s)\n' "$label" "$actual_size" "$expected_end"
+    return 1
+  fi
+  # End marker line content (command substitution strips trailing newline)
+  local end_line
+  end_line="$(tail -c 15 "$shard")"
+  if [[ "$end_line" != '---END BODY---' ]]; then
+    printf '%s: FAIL bad END marker\n' "$label"
+    return 1
+  fi
+  printf '%s: OK\n' "$label"
+}
+
+case "$mode" in
+  body)
+    if [[ -f "$current" ]]; then
+      shard_body "$current"
+    else
+      cat <<EOF
+# Memvid Startup Context
+
+- project: \`$project\`
+- shard: \`none\` (no shard written yet)
+
+This project has no sealed shard yet. The next agent to do meaningful work should write the first shard via \`memvid-write --project $project\`.
+EOF
+    fi
+    ;;
+  raw)
+    [[ -f "$current" ]] && cat "$current" || echo "memvid-context: no current shard for $project" >&2
+    ;;
+  full)
+    for label_pair in "current:$current" ".1:$prev1" ".2:$prev2"; do
+      label="${label_pair%%:*}"
+      shard="${label_pair#*:}"
+      if [[ -f "$shard" ]]; then
+        printf '===== %s (%s) =====\n' "$label" "$shard"
+        shard_body "$shard"
+        printf '\n'
+      fi
+    done
+    ;;
+  verify)
+    rc=0
+    # Chain: current.prev-sha must equal sha256(.1 file); .1.prev-sha must equal sha256(.2 file); .2.prev-sha is whatever (no .3 retained).
+    expected_for_current="none"
+    if [[ -f "$prev1" ]]; then
+      expected_for_current="$(sha256sum < "$prev1" | awk '{print $1}')"
+    fi
+    expected_for_prev1="none"
+    if [[ -f "$prev2" ]]; then
+      expected_for_prev1="$(sha256sum < "$prev2" | awk '{print $1}')"
+    fi
+    verify_shard "$current" "$expected_for_current" "current" || rc=1
+    verify_shard "$prev1" "$expected_for_prev1" ".1" || rc=1
+    # For .2, we don't have .3 to compare; just verify body integrity. Pass its own declared prev as expected so prev-sha check is a no-op.
+    if [[ -f "$prev2" ]]; then
+      declared_prev2="$(shard_header "$prev2" prev-sha256)"
+      verify_shard "$prev2" "$declared_prev2" ".2" || rc=1
+    fi
+    exit "$rc"
+    ;;
+  history)
+    proj_archive="$archive_dir/$project"
+    if [[ ! -d "$proj_archive" ]]; then
+      echo "memvid-context: no archive for $project" >&2
+      exit 0
+    fi
+    # Format: <iso-ish-ts>-<short>.mv2.xz <bytes>
+    find "$proj_archive" -maxdepth 1 -type f -name '*.mv2.xz' -printf '%f %s\n' | sort
+    ;;
+esac

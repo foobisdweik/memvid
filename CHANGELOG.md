@@ -5,6 +5,23 @@ All notable changes to Memvid will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-05-15 — Sealed shard rewrite
+
+### Removed
+- Entire Rust workspace: `memvid-core`, embedder, ingestor, librarian, queue writer, and all crate dependencies.
+- Queue-based write pipeline under `/var/lib/memvid/queue/` and the librarian-driven recall path.
+- Embedding models, vector indices, full-text search, frame-based storage, and WAL machinery.
+
+### Added
+- MV2 v3 sealed shard format: plain UTF-8, seven-line header, fixed body framing, SHA-256 chain across rotated shards. Spec in `MV2_SPEC.md`.
+- Three-slot rotation per project (`current`, `.1`, `.2`) with shards evicted from `.2` archived under `xz -9e` in a per-project archive directory, retained indefinitely.
+- Three bash tools: `memvid-write` (seal and rotate), `memvid-context` (read current / `--full` / `--verify` / `--history` / `--raw`), and the `claude-memvid` / `codex-memvid` / `gemini-memvid` wrappers that inject the current shard into the corresponding agent CLI.
+- Shrinkage safety check in `memvid-write`: refuses a new body smaller than 25% of the prior body unless `--force` is given (only enforced when the prior body exceeds 256 bytes).
+
+### Changed
+- Agents now own the shard outright and rewrite it in full at meaningful milestones. Incremental queue entries are gone; each write is a complete snapshot, with the three-slot rotation and the archive providing the recovery path.
+- Sealed shards are made read-only (`chmod 0444`) after each write to prevent silent overwrites.
+
 ## [Unreleased]
 
 ### Added
